@@ -128,6 +128,8 @@
 "status.instances.separate_timers" = "Running instances: {count} · Separate timers";
 "status.instances.paused_separate_timers" = "Paused · Running instances: {count} · Separate timers";
 "status.instances.deferred_mixed" = "Running instances: {count} · Deferred: {deferredCount}";
+"status.instances.operation_in_progress" = "Running instances: {count} · Actions in progress: {operationCount}";
+"status.instances.operation_in_progress_with_deferrals" = "Running instances: {count} · Actions in progress: {operationCount} · Deferred: {deferredCount}";
 
 /* Dynamic help */
 "help.rule_registry.batch_unavailable" = "These rules were created by a newer version and cannot be read. Rule-dependent batch actions are unavailable.";

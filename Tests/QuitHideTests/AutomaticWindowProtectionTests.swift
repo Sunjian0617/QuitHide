@@ -251,6 +251,54 @@ struct AutomaticWindowProtectionTests {
         ) == nil)
     }
 
+    @Test("A pending instance operation remains visible beside a deferral")
+    func mixedOperationAndDeferralSummaryKeepsOperationCount() {
+        let operation = AppAutomationStatus(
+            text: "Quit in progress",
+            isOperationInProgress: true
+        )
+        let deferred = AppAutomationStatus(
+            text: "Deferred",
+            isProtected: true,
+            isDeferred: true
+        )
+
+        #expect(operation.isOperationInProgress)
+        #expect(AppAutomationStatus.operationInProgressInstanceCount(
+            [operation, deferred]
+        ) == 1)
+    }
+
+    @Test("Deferral countdown can replace completed hide status but not active operations")
+    func deferralPrecedesCompletedHideUnlessOperationHasPriority() {
+        #expect(AppAutomationStatus.shouldPresentDeferralInsteadOfCompletedHide(
+            isDeferred: true,
+            hasHigherPriorityStatus: false
+        ))
+        #expect(!AppAutomationStatus.shouldPresentDeferralInsteadOfCompletedHide(
+            isDeferred: true,
+            hasHigherPriorityStatus: true
+        ))
+        #expect(!AppAutomationStatus.shouldPresentDeferralInsteadOfCompletedHide(
+            isDeferred: false,
+            hasHigherPriorityStatus: false
+        ))
+    }
+
+    @Test("Completed one-shot hide remains visible for an automatic-quit rule")
+    func completedManualHideStatusSurvivesAutomaticQuitPolicy() {
+        #expect(AppAutomationStatus.shouldPresentCompletedHide(
+            automaticAction: .quit,
+            oneShotAction: .hide,
+            hideIsCompleted: true
+        ))
+        #expect(!AppAutomationStatus.shouldPresentCompletedHide(
+            automaticAction: .quit,
+            oneShotAction: nil,
+            hideIsCompleted: true
+        ))
+    }
+
     @Test("A dynamic protection snapshot is used for only one automatic action")
     func dynamicSnapshotIsSingleUse() {
         #expect(AutomaticWindowProtectionInteractionPolicy

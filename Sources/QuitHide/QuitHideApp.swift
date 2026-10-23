@@ -80,12 +80,18 @@ private extension AppAutomationStatusTone {
     }
 }
 
+private enum AutomaticActionValidationStage: Equatable {
+    case preQuitHide
+    case finalAction
+}
+
 struct AppAutomationStatus {
     let text: String
     let isError: Bool
     let isWarning: Bool
     let isProtected: Bool
     let isDeferred: Bool
+    let isOperationInProgress: Bool
     let helpText: String?
 
     init(
@@ -94,6 +100,7 @@ struct AppAutomationStatus {
         isWarning: Bool = false,
         isProtected: Bool = false,
         isDeferred: Bool = false,
+        isOperationInProgress: Bool = false,
         helpText: String? = nil
     ) {
         self.text = text
@@ -101,7 +108,24 @@ struct AppAutomationStatus {
         self.isWarning = isWarning
         self.isProtected = isProtected
         self.isDeferred = isDeferred
+        self.isOperationInProgress = isOperationInProgress
         self.helpText = helpText
+    }
+
+    static func shouldPresentDeferralInsteadOfCompletedHide(
+        isDeferred: Bool,
+        hasHigherPriorityStatus: Bool
+    ) -> Bool {
+        isDeferred && !hasHigherPriorityStatus
+    }
+
+    static func shouldPresentCompletedHide(
+        automaticAction: AutoAction,
+        oneShotAction: AutoAction?,
+        hideIsCompleted: Bool
+    ) -> Bool {
+        hideIsCompleted &&
+            (automaticAction == .hide || oneShotAction == .hide)
     }
 
     static func mixedDeferredInstanceCount(
@@ -113,6 +137,14 @@ struct AppAutomationStatus {
             return nil
         }
         return deferredCount
+    }
+
+    static func operationInProgressInstanceCount(
+        _ statuses: [AppAutomationStatus]
+    ) -> Int? {
+        let operationCount = statuses.filter(\.isOperationInProgress).count
+        guard operationCount > 0 else { return nil }
+        return operationCount
     }
 
     var tone: AppAutomationStatusTone {
@@ -668,6 +700,19 @@ final class AppModel: ObservableObject {
         guard defaultHideEnabled != enabled else { return }
         defaultHideEnabled = enabled
         defaults.set(enabled, forKey: Keys.defaultHideEnabled)
+        if !enabled {
+            let inheritedBundleIdentifiers = Set(
+                apps.lazy
+                    .map(\.bundleIdentifier)
+                    .filter { self.policy(for: $0) == .unset }
+            )
+            var nextRegistry = appAutomationDeferralRegistry
+            if nextRegistry.removeDeferrals(
+                for: inheritedBundleIdentifiers
+            ) {
+                appAutomationDeferralRegistry = nextRegistry
+            }
+        }
         resetDefaultPolicyRuntimeState(restartTimer: enabled)
         statusMessage = enabled
             ? "未单独设置的 App 将在离开前台后自动隐藏"
@@ -787,7 +832,10 @@ final class AppModel: ObservableObject {
         )
 
         if forceQuitOperationTokens[runtimeID] != nil {
-            return AppAutomationStatus(text: localized(.statusForceQuitInProgress))
+            return AppAutomationStatus(
+                text: localized(.statusForceQuitInProgress),
+                isOperationInProgress: true
+            )
         }
         if forceQuitFailures.contains(runtimeID) {
             return AppAutomationStatus(
@@ -804,6 +852,7 @@ final class AppModel: ObservableObject {
             case .waiting:
                 return AppAutomationStatus(
                     text: localized(.statusQuitInProgress),
+                    isOperationInProgress: true,
                     helpText: localized(.statusQuitWaitingHelp)
                 )
             case .timedOut:
@@ -818,22 +867,18 @@ final class AppModel: ObservableObject {
         if let oneShotAction = oneShotActionStates[runtimeID]?.action {
             switch oneShotAction {
             case .hide:
-                if hidePresentation == .completed {
-                    return AppAutomationStatus(
-                        text: localized(.statusHideHidden),
-                        isError: false
-                    )
-                }
                 if hidePresentation == .inProgress {
                     return AppAutomationStatus(
                         text: localized(.statusHideInProgress),
-                        isError: false
+                        isError: false,
+                        isOperationInProgress: true
                     )
                 }
             case .quit:
                 return AppAutomationStatus(
                     text: localized(.statusQuitRequestedWaiting),
-                    isError: false
+                    isError: false,
+                    isOperationInProgress: true
                 )
             case .unset, .ignore:
                 break
@@ -841,7 +886,16 @@ final class AppModel: ObservableObject {
         }
 
         let action = effectivePolicy(for: bundleID)
-        guard action.isAutomated else { return nil }
+        guard action.isAutomated else {
+            if oneShotActionStates[runtimeID]?.action == .hide,
+               hidePresentation == .completed {
+                return AppAutomationStatus(
+                    text: localized(.statusHideHidden),
+                    isError: false
+                )
+            }
+            return nil
+        }
 
         if let failedAction = actionFailures[runtimeID] {
             let key: L10n.Key = retryStates[runtimeID]?.hasAttemptsRemaining == true
@@ -858,20 +912,31 @@ final class AppModel: ObservableObject {
             if hidePresentation == .inProgress {
                 return AppAutomationStatus(
                     text: localized(.statusHideInProgress),
-                    isError: false
+                    isError: false,
+                    isOperationInProgress: true
                 )
             }
         }
         if action == .quit, alreadyHandled.contains(runtimeID) {
             return AppAutomationStatus(
                 text: localized(.statusQuitRequestedWaiting),
-                isError: false
+                isError: false,
+                isOperationInProgress: true
             )
         }
-        if let remaining = appAutomationDeferralRegistry.remainingTime(
+        let remainingDeferral = appAutomationDeferralRegistry.remainingTime(
             for: bundleID,
             at: effectiveNow
-        ) {
+        )
+        let hasHigherPriorityStatus =
+            actionOperationTokens[runtimeID] != nil ||
+            quitRequestStates[runtimeID] != nil ||
+            forceQuitOperationTokens[runtimeID] != nil ||
+            actionFailures[runtimeID] != nil
+        if AppAutomationStatus.shouldPresentDeferralInsteadOfCompletedHide(
+            isDeferred: remainingDeferral != nil,
+            hasHigherPriorityStatus: hasHigherPriorityStatus
+        ), let remaining = remainingDeferral {
             return AppAutomationStatus(
                 text: localized(.statusAppDeferralActive, replacements: [
                     "time": formatRemainingTime(remaining)
@@ -881,7 +946,11 @@ final class AppModel: ObservableObject {
                 helpText: localized(.statusAppDeferralHelp)
             )
         }
-        if action == .hide, hidePresentation == .completed {
+        if AppAutomationStatus.shouldPresentCompletedHide(
+            automaticAction: action,
+            oneShotAction: oneShotActionStates[runtimeID]?.action,
+            hideIsCompleted: hidePresentation == .completed
+        ) {
             return AppAutomationStatus(
                 text: localized(.statusHideHidden),
                 isError: false
@@ -1966,17 +2035,7 @@ final class AppModel: ObservableObject {
         guard automationEnabled else { return }
 
         let now = effectiveNow
-        var nextDeferralRegistry = appAutomationDeferralRegistry
-        let expiredDeferrals = nextDeferralRegistry.expire(at: now)
-        if !expiredDeferrals.isEmpty {
-            appAutomationDeferralRegistry = nextDeferralRegistry
-            for reset in expiredDeferrals {
-                resetAutomaticRuntimeState(
-                    bundleIdentifier: reset.bundleIdentifier,
-                    restartAt: reset.timerRestartAt
-                )
-            }
-        }
+        expireAutomationDeferrals(at: now)
 
         for item in apps {
             let bundleID = item.bundleIdentifier
@@ -2015,13 +2074,43 @@ final class AppModel: ObservableObject {
                     continue
                 case .preHide:
                     guard !alreadyHandled.contains(runtimeID) else { continue }
+                    let validationDeferralRevision =
+                        appAutomationDeferralRegistry.revision(for: bundleID)
                     guard await validateAcceptedScreenVisibilityFingerprint()
                     else {
                         return
                     }
+                    let validationNow = effectiveNow
+                    expireAutomationDeferrals(at: validationNow)
+                    let currentlyEligibleItem =
+                        currentlyEligibleAutomaticItem(
+                            action,
+                            on: item,
+                            stage: .preQuitHide,
+                            at: validationNow
+                        )
+                    guard AppAutomationActionValidationPolicy.shouldProceed(
+                        deferralStateChanged:
+                            appAutomationDeferralRegistry.revision(
+                                for: bundleID
+                            ) !=
+                                validationDeferralRevision,
+                        isDeferredNow:
+                            appAutomationDeferralRegistry.isDeferred(
+                                for: bundleID,
+                                at: validationNow
+                            ),
+                        isStillIdleEligible: currentlyEligibleItem != nil
+                    ), let currentlyEligibleItem else {
+                        continue
+                    }
                     let actionProtectionMode =
                         activeAutomaticWindowProtectionMode
-                    performPreQuitHide(on: item, state: preHideState)
+                    performPreQuitHide(
+                        on: currentlyEligibleItem,
+                        state: preQuitHideStates[runtimeID]
+                            ?? PreQuitHideRuntimeState()
+                    )
                     if AutomaticWindowProtectionInteractionPolicy
                         .requiresFreshSnapshotAfterAutomaticAction(
                             activeMode: actionProtectionMode
@@ -2031,7 +2120,6 @@ final class AppModel: ObservableObject {
                     }
                     continue
                 case .quit:
-                    preQuitHideStates.removeValue(forKey: runtimeID)
                     let isFirstDeadlineAttempt = !quitDeadlineAttempted.contains(runtimeID)
                     guard QuitAutomationTiming.shouldAttemptQuit(
                         isFirstDeadlineAttempt: isFirstDeadlineAttempt,
@@ -2041,14 +2129,6 @@ final class AppModel: ObservableObject {
                     ) else {
                         continue
                     }
-                    if isFirstDeadlineAttempt {
-                        // A failed manual batch request before Q must not delay or
-                        // consume retries from the rule's first deadline attempt.
-                        alreadyHandled.remove(runtimeID)
-                        actionFailures.removeValue(forKey: runtimeID)
-                        retryStates.removeValue(forKey: runtimeID)
-                    }
-                    quitDeadlineAttempted.insert(runtimeID)
                 }
             } else {
                 guard AutomaticHideAttemptPolicy.shouldAttempt(
@@ -2063,14 +2143,51 @@ final class AppModel: ObservableObject {
                 ) else { continue }
             }
 
+            let validationDeferralRevision = appAutomationDeferralRegistry
+                .revision(for: bundleID)
             guard await validateAcceptedScreenVisibilityFingerprint() else {
                 return
+            }
+            let validationNow = effectiveNow
+            expireAutomationDeferrals(at: validationNow)
+            let currentlyEligibleItem = currentlyEligibleAutomaticItem(
+                action,
+                on: item,
+                stage: .finalAction,
+                at: validationNow
+            )
+            guard AppAutomationActionValidationPolicy.shouldProceed(
+                deferralStateChanged:
+                    appAutomationDeferralRegistry.revision(
+                        for: bundleID
+                    ) !=
+                        validationDeferralRevision,
+                isDeferredNow: appAutomationDeferralRegistry.isDeferred(
+                    for: bundleID,
+                    at: validationNow
+                ),
+                isStillIdleEligible: currentlyEligibleItem != nil
+            ), let currentlyEligibleItem else {
+                continue
+            }
+            if action == .quit {
+                preQuitHideStates.removeValue(forKey: runtimeID)
+                let isFirstDeadlineAttempt =
+                    !quitDeadlineAttempted.contains(runtimeID)
+                if isFirstDeadlineAttempt {
+                    // A failed manual batch request before Q must not delay or
+                    // consume retries from the rule's first deadline attempt.
+                    alreadyHandled.remove(runtimeID)
+                    actionFailures.removeValue(forKey: runtimeID)
+                    retryStates.removeValue(forKey: runtimeID)
+                }
+                quitDeadlineAttempted.insert(runtimeID)
             }
             let actionProtectionMode = activeAutomaticWindowProtectionMode
             perform(
                 action,
-                on: item.app,
-                named: item.name,
+                on: currentlyEligibleItem.app,
+                named: currentlyEligibleItem.name,
                 bundleIdentifier: bundleID,
                 runtimeIdentifier: runtimeID,
                 source: .automatic
@@ -2083,6 +2200,109 @@ final class AppModel: ObservableObject {
                 return
             }
         }
+    }
+
+    private func expireAutomationDeferrals(
+        at instant: TimeInterval
+    ) {
+        var nextRegistry = appAutomationDeferralRegistry
+        let expiredDeferrals = nextRegistry.expire(at: instant)
+        guard !expiredDeferrals.isEmpty else { return }
+
+        appAutomationDeferralRegistry = nextRegistry
+        for reset in expiredDeferrals {
+            resetAutomaticRuntimeState(
+                bundleIdentifier: reset.bundleIdentifier,
+                restartAt: reset.timerRestartAt
+            )
+        }
+    }
+
+    private func currentlyEligibleAutomaticItem(
+        _ action: AutoAction,
+        on item: RunningAppItem,
+        stage: AutomaticActionValidationStage,
+        at now: TimeInterval
+    ) -> RunningAppItem? {
+        let bundleID = item.bundleIdentifier
+        let runtimeID = item.id
+        guard automationEnabled,
+              workspaceSessionIsActive,
+              effectivePolicy(for: bundleID) == action,
+              action.isAutomated,
+              actionOperationTokens[runtimeID] == nil,
+              oneShotActionStates[runtimeID] == nil,
+              quitRequestStates[runtimeID] == nil,
+              forceQuitOperationTokens[runtimeID] == nil,
+              !automaticallyProtectedBundleIdentifiers.contains(bundleID),
+              let currentItem = apps.first(where: { $0.id == runtimeID }),
+              !currentItem.isActive,
+              let inactiveAt = inactiveSince[runtimeID] else {
+            return nil
+        }
+
+        let elapsed = now - inactiveAt
+        let actionDelay = thresholdSeconds(for: bundleID)
+        guard AppAutomationActionValidationPolicy
+            .hasReachedRequiredTimingThreshold(
+                isPreQuitHide: stage == .preQuitHide,
+                elapsed: elapsed,
+                actionDelay: actionDelay
+            ) else {
+            return nil
+        }
+
+        switch action {
+        case .hide:
+            guard stage == .finalAction,
+                  AutomaticHideAttemptPolicy.shouldAttempt(
+                    hasConfirmedCompletion:
+                        hideCompletionStates[runtimeID] != nil,
+                    isAlreadyHandled: alreadyHandled.contains(runtimeID),
+                    canRetry:
+                        retryStates[runtimeID]?.canAttempt(at: now) != false,
+                    elapsed: elapsed,
+                    actionDelay: actionDelay
+                  ) else {
+                return nil
+            }
+        case .quit:
+            let preHideState = preQuitHideStates[runtimeID]
+                ?? PreQuitHideRuntimeState()
+            let decision = QuitAutomationTiming.decision(
+                enabled: preQuitHideEnabled,
+                elapsed: elapsed,
+                hideDelay: preQuitHideDelaySeconds,
+                quitDelay: actionDelay,
+                isHidden: currentItem.isHidden,
+                hideStage: preHideState.stage,
+                canAttemptHide: preHideState.retryState.canAttempt(at: now)
+            )
+            switch stage {
+            case .preQuitHide:
+                guard decision == .preHide,
+                      !alreadyHandled.contains(runtimeID) else {
+                    return nil
+                }
+            case .finalAction:
+                let isFirstDeadlineAttempt =
+                    !quitDeadlineAttempted.contains(runtimeID)
+                guard decision == .quit,
+                      QuitAutomationTiming.shouldAttemptQuit(
+                        isFirstDeadlineAttempt: isFirstDeadlineAttempt,
+                        isAlreadyHandled: alreadyHandled.contains(runtimeID),
+                        hasActionFailure: actionFailures[runtimeID] != nil,
+                        canRetry:
+                            retryStates[runtimeID]?.canAttempt(at: now) != false
+                      ) else {
+                    return nil
+                }
+            }
+        case .unset, .ignore:
+            return nil
+        }
+
+        return currentItem
     }
 
     private func validateAcceptedScreenVisibilityFingerprint() async -> Bool {
@@ -3425,6 +3645,30 @@ struct AppRow: View {
                     ]),
                     isWarning: true,
                     helpText: model.localized(.statusInstancesQuitNotCompletedHelp)
+                )
+            }
+            if let operationCount = AppAutomationStatus
+                .operationInProgressInstanceCount(statuses) {
+                let deferredCount = AppAutomationStatus
+                    .mixedDeferredInstanceCount(
+                        statuses,
+                        totalInstances: item.runningInstances.count
+                    )
+                let key: L10n.Key = deferredCount == nil
+                    ? .statusInstancesOperationInProgress
+                    : .statusInstancesOperationInProgressWithDeferrals
+                var replacements = [
+                    "count": String(item.runningInstances.count),
+                    "operationCount": String(operationCount)
+                ]
+                if let deferredCount {
+                    replacements["deferredCount"] = String(deferredCount)
+                }
+                return AppAutomationStatus(
+                    text: model.localized(key, replacements: replacements),
+                    isDeferred: deferredCount != nil,
+                    isOperationInProgress: true,
+                    helpText: statuses.first(where: \.isOperationInProgress)?.helpText
                 )
             }
             if let deferredCount = AppAutomationStatus.mixedDeferredInstanceCount(

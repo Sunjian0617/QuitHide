@@ -128,6 +128,8 @@
 "status.instances.separate_timers" = "{count} 个运行实例 · 分别计时";
 "status.instances.paused_separate_timers" = "已暂停 · {count} 个运行实例 · 分别计时";
 "status.instances.deferred_mixed" = "运行实例：{count} · 手动延期：{deferredCount}";
+"status.instances.operation_in_progress" = "{count} 个运行实例 · {operationCount} 个操作进行中";
+"status.instances.operation_in_progress_with_deferrals" = "{count} 个运行实例 · {operationCount} 个操作进行中 · 延期：{deferredCount}";
 
 /* Dynamic help */
 "help.rule_registry.batch_unavailable" = "规则来自更高版本，当前版本无法解析，不能执行依赖规则的批量操作";

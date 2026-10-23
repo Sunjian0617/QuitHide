@@ -169,6 +169,8 @@ enum L10n {
         case statusInstancesSeparateTimers = "status.instances.separate_timers"
         case statusInstancesPausedSeparateTimers = "status.instances.paused_separate_timers"
         case statusInstancesDeferredMixed = "status.instances.deferred_mixed"
+        case statusInstancesOperationInProgress = "status.instances.operation_in_progress"
+        case statusInstancesOperationInProgressWithDeferrals = "status.instances.operation_in_progress_with_deferrals"
 
         case helpRuleRegistryBatchUnavailable = "help.rule_registry.batch_unavailable"
         case helpImmediateNoTargets = "help.immediate.no_targets"

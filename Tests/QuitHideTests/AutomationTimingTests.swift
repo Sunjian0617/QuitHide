@@ -382,6 +382,22 @@ struct PreQuitHideTimingTests {
         #expect(decision(elapsed: 20, hideDelay: 5, quitDelay: 20) == .quit)
     }
 
+    @Test("Post-validation timing gate preserves the pre-hide window")
+    func postValidationGateAllowsPreHideBeforeQuitDeadline() {
+        #expect(AppAutomationActionValidationPolicy
+            .hasReachedRequiredTimingThreshold(
+                isPreQuitHide: true,
+                elapsed: 10,
+                actionDelay: 20
+            ))
+        #expect(!AppAutomationActionValidationPolicy
+            .hasReachedRequiredTimingThreshold(
+                isPreQuitHide: false,
+                elapsed: 10,
+                actionDelay: 20
+            ))
+    }
+
     @Test("An equal hide and quit delay never pre-hides")
     func equalDelays() {
         #expect(decision(elapsed: 9, hideDelay: 10, quitDelay: 10) == .wait)

@@ -56,6 +56,117 @@ struct AppAutomationDeferralTests {
         #expect(!registry.isDeferred(for: "com.example.editor", at: 1_900))
     }
 
+    @Test("A deferral scheduled during async validation blocks automatic action")
+    func deferralScheduledDuringAsyncValidationBlocksAction() {
+        var registry = AppAutomationDeferralRegistry()
+        let validationRevision = registry.revision(for: "com.example.editor")
+
+        // MainActor work can run while screen fingerprint validation is suspended.
+        registry.deferAutomation(
+            for: "com.example.editor",
+            duration: .minutes15,
+            at: 1_000
+        )
+
+        #expect(!AppAutomationActionValidationPolicy.shouldProceed(
+            deferralStateChanged:
+                registry.revision(for: "com.example.editor") !=
+                    validationRevision,
+            isDeferredNow: registry.isDeferred(
+                for: "com.example.editor",
+                at: 1_001
+            ),
+            isStillIdleEligible: true
+        ))
+    }
+
+    @Test("An unchanged deferral and eligible idle timer may proceed after validation")
+    func unchangedDeferralStateCanProceedAfterValidation() {
+        let registry = AppAutomationDeferralRegistry()
+        let validationRevision = registry.revision(for: "com.example.editor")
+
+        #expect(AppAutomationActionValidationPolicy.shouldProceed(
+            deferralStateChanged:
+                registry.revision(for: "com.example.editor") !=
+                    validationRevision,
+            isDeferredNow: registry.isDeferred(
+                for: "com.example.editor",
+                at: 1_001
+            ),
+            isStillIdleEligible: true
+        ))
+    }
+
+    @Test("A deferral cancelled during validation blocks the stale action")
+    func cancelledDeferralDuringValidationBlocksAction() {
+        var registry = AppAutomationDeferralRegistry()
+        let validationRevision = registry.revision(for: "com.example.editor")
+        registry.deferAutomation(
+            for: "com.example.editor",
+            duration: .minutes15,
+            at: 1_000
+        )
+        _ = registry.endDeferral(for: "com.example.editor", at: 1_001)
+
+        #expect(!AppAutomationActionValidationPolicy.shouldProceed(
+            deferralStateChanged:
+                registry.revision(for: "com.example.editor") !=
+                    validationRevision,
+            isDeferredNow: registry.isDeferred(
+                for: "com.example.editor",
+                at: 1_002
+            ),
+            isStillIdleEligible: true
+        ))
+    }
+
+    @Test("Another app's deferral does not invalidate this app's validation")
+    func unrelatedDeferralDoesNotInvalidateValidation() {
+        var registry = AppAutomationDeferralRegistry()
+        let validationRevision = registry.revision(for: "com.example.editor")
+        registry.deferAutomation(
+            for: "com.example.player",
+            duration: .minutes15,
+            at: 1_000
+        )
+
+        #expect(AppAutomationActionValidationPolicy.shouldProceed(
+            deferralStateChanged:
+                registry.revision(for: "com.example.editor") !=
+                    validationRevision,
+            isDeferredNow: registry.isDeferred(
+                for: "com.example.editor",
+                at: 1_001
+            ),
+            isStillIdleEligible: true
+        ))
+    }
+
+    @Test("An expired deferral during async validation still restarts the idle timer")
+    func expiredDeferralDuringAsyncValidationBlocksAction() {
+        var registry = AppAutomationDeferralRegistry()
+        let validationRevision = registry.revision(for: "com.example.editor")
+        registry.deferAutomation(
+            for: "com.example.editor",
+            duration: .minutes15,
+            at: 1_000
+        )
+
+        let resets = registry.expire(at: 1_900)
+
+        #expect(resets.first?.timerRestartAt == 1_900)
+        #expect(!AppAutomationActionValidationPolicy.shouldProceed(
+            deferralStateChanged:
+                registry.revision(for: "com.example.editor") !=
+                    validationRevision,
+            isDeferredNow: registry.isDeferred(
+                for: "com.example.editor",
+                at: 1_900
+            ),
+            isStillIdleEligible: true
+        ))
+    }
+
     @Test("A deferral expires at its exact deadline")
     func deferralExpiresAtItsExactDeadline() {
         var registry = AppAutomationDeferralRegistry()
@@ -135,6 +246,26 @@ struct AppAutomationDeferralTests {
 
         #expect(!registry.isDeferred(for: "com.example.editor", at: 1_001))
         #expect(registry.remainingTime(for: "com.example.editor", at: 1_001) == nil)
+    }
+
+    @Test("Disabling inherited automatic policy can remove only selected deferrals")
+    func removingInheritedPolicyDeferralsLeavesExplicitAppsAlone() {
+        var registry = AppAutomationDeferralRegistry()
+        registry.deferAutomation(
+            for: "com.example.inherited",
+            duration: .minutes15,
+            at: 1_000
+        )
+        registry.deferAutomation(
+            for: "com.example.explicit",
+            duration: .minutes15,
+            at: 1_000
+        )
+
+        let removed = registry.removeDeferrals(for: ["com.example.inherited"])
+        #expect(removed)
+        #expect(!registry.isDeferred(for: "com.example.inherited", at: 1_001))
+        #expect(registry.isDeferred(for: "com.example.explicit", at: 1_001))
     }
 
     @Test("A deferral stays while another instance of the app runs")
