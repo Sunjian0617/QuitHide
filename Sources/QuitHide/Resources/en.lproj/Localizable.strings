@@ -85,6 +85,11 @@
 "context.quit.all_instances" = "Quit Now (All {count} Instances)";
 "context.force_quit" = "Force Quit…";
 "context.force_quit.all_instances" = "Force Quit All {count} Instances…";
+"context.defer.title" = "Defer Automatic Action";
+"context.defer.minutes15" = "15 minutes";
+"context.defer.minutes30" = "30 minutes";
+"context.defer.minutes60" = "60 minutes";
+"context.defer.end" = "End Deferral Early";
 
 /* Automation status */
 "status.force_quit.in_progress" = "Force Quitting…";
@@ -102,6 +107,10 @@
 "status.active" = "In Use · Waiting to Start";
 "status.in_use" = "In Use";
 "status.stage_manager.group_protected" = "Protected by Stage Manager Group";
+"status.app_deferral.active" = "Manual deferral · {time} left";
+"status.app_deferral.help" = "A full idle interval starts after the deferral ends.";
+"status.screen_visibility.protected" = "Visible window protected";
+"status.stage_manager.foreground_group_protected" = "Stage Manager foreground group protected";
 "status.stage_manager.unavailable_paused" = "Group Detection Unavailable · Automation Paused";
 "status.stage_manager.showing_desktop" = "Showing Desktop";
 "status.window_protection.waiting_for_stability" = "Windows Are Changing · Automation Temporarily Paused";
@@ -118,6 +127,7 @@
 "status.instances.same_status" = "Running instances: {count} · {status}";
 "status.instances.separate_timers" = "Running instances: {count} · Separate timers";
 "status.instances.paused_separate_timers" = "Paused · Running instances: {count} · Separate timers";
+"status.instances.deferred_mixed" = "Running instances: {count} · Deferred: {deferredCount}";
 
 /* Dynamic help */
 "help.rule_registry.batch_unavailable" = "These rules were created by a newer version and cannot be read. Rule-dependent batch actions are unavailable.";

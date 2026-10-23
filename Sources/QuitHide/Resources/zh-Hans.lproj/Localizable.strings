@@ -85,6 +85,11 @@
 "context.quit.all_instances" = "立即退出（全部 {count} 个实例）";
 "context.force_quit" = "强制退出…";
 "context.force_quit.all_instances" = "强制退出全部 {count} 个实例…";
+"context.defer.title" = "延期自动处理";
+"context.defer.minutes15" = "15 分钟";
+"context.defer.minutes30" = "30 分钟";
+"context.defer.minutes60" = "60 分钟";
+"context.defer.end" = "提前结束延期";
 
 /* Automation status */
 "status.force_quit.in_progress" = "正在强制退出…";
@@ -102,6 +107,10 @@
 "status.active" = "使用中 · 离开后计时";
 "status.in_use" = "使用中";
 "status.stage_manager.group_protected" = "台前调度分组保护中";
+"status.app_deferral.active" = "手动延期 · 还剩 {time}";
+"status.app_deferral.help" = "延期结束后，将重新开始完整的闲置计时。";
+"status.screen_visibility.protected" = "可见窗口保护中";
+"status.stage_manager.foreground_group_protected" = "台前调度前台分组保护中";
 "status.stage_manager.unavailable_paused" = "分组识别不可用 · 自动处理已暂停";
 "status.stage_manager.showing_desktop" = "正在显示桌面";
 "status.window_protection.waiting_for_stability" = "窗口正在变化 · 自动处理暂时暂停";
@@ -118,6 +127,7 @@
 "status.instances.same_status" = "{count} 个运行实例 · {status}";
 "status.instances.separate_timers" = "{count} 个运行实例 · 分别计时";
 "status.instances.paused_separate_timers" = "已暂停 · {count} 个运行实例 · 分别计时";
+"status.instances.deferred_mixed" = "运行实例：{count} · 手动延期：{deferredCount}";
 
 /* Dynamic help */
 "help.rule_registry.batch_unavailable" = "规则来自更高版本，当前版本无法解析，不能执行依赖规则的批量操作";

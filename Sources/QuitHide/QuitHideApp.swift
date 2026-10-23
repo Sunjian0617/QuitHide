@@ -104,6 +104,17 @@ struct AppAutomationStatus {
         self.helpText = helpText
     }
 
+    static func mixedDeferredInstanceCount(
+        _ statuses: [AppAutomationStatus],
+        totalInstances: Int
+    ) -> Int? {
+        let deferredCount = statuses.filter(\.isDeferred).count
+        guard deferredCount > 0, deferredCount < totalInstances else {
+            return nil
+        }
+        return deferredCount
+    }
+
     var tone: AppAutomationStatusTone {
         if isError { return .error }
         if isWarning { return .warning }
@@ -549,6 +560,13 @@ final class AppModel: ObservableObject {
         )
     }
 
+    func isAutomationDeferred(for item: CatalogAppItem) -> Bool {
+        appAutomationDeferralRegistry.isDeferred(
+            for: item.bundleIdentifier,
+            at: effectiveNow
+        )
+    }
+
     func deferAutomation(
         for item: CatalogAppItem,
         duration: AppAutomationDeferralDuration
@@ -837,12 +855,6 @@ final class AppModel: ObservableObject {
             )
         }
         if action == .hide {
-            if hidePresentation == .completed {
-                return AppAutomationStatus(
-                    text: localized(.statusHideHidden),
-                    isError: false
-                )
-            }
             if hidePresentation == .inProgress {
                 return AppAutomationStatus(
                     text: localized(.statusHideInProgress),
@@ -856,6 +868,25 @@ final class AppModel: ObservableObject {
                 isError: false
             )
         }
+        if let remaining = appAutomationDeferralRegistry.remainingTime(
+            for: bundleID,
+            at: effectiveNow
+        ) {
+            return AppAutomationStatus(
+                text: localized(.statusAppDeferralActive, replacements: [
+                    "time": formatRemainingTime(remaining)
+                ]),
+                isProtected: true,
+                isDeferred: true,
+                helpText: localized(.statusAppDeferralHelp)
+            )
+        }
+        if action == .hide, hidePresentation == .completed {
+            return AppAutomationStatus(
+                text: localized(.statusHideHidden),
+                isError: false
+            )
+        }
         if let protectedStatus = AutomaticWindowProtectionRowStatusPolicy.status(
             activeMode: activeAutomaticWindowProtectionMode,
             bundleIsProtected:
@@ -863,9 +894,17 @@ final class AppModel: ObservableObject {
             stageManagerHoldReasons:
                 stageManagerHoldReasonsByBundleIdentifier[bundleID] ?? []
         ) {
-            let statusKey: L10n.Key = protectedStatus == .inUse
-                ? .statusInUse
-                : .statusStageManagerGroupProtected
+            let statusKey: L10n.Key
+            switch protectedStatus {
+            case .inUse:
+                statusKey = .statusInUse
+            case .stageManagerGroupProtected:
+                statusKey = .statusStageManagerGroupProtected
+            case .screenVisibilityProtected:
+                statusKey = .statusScreenVisibilityProtected
+            case .stageManagerForegroundGroupProtected:
+                statusKey = .statusStageManagerForegroundGroupProtected
+            }
             return AppAutomationStatus(
                 text: localized(statusKey),
                 isProtected: true
@@ -3352,6 +3391,16 @@ struct AppRow: View {
         ])
     }
 
+    private func deferralDurationTitleKey(
+        for duration: AppAutomationDeferralDuration
+    ) -> L10n.Key {
+        switch duration {
+        case .minutes15: return .contextDeferMinutes15
+        case .minutes30: return .contextDeferMinutes30
+        case .minutes60: return .contextDeferMinutes60
+        }
+    }
+
     private var displayStatus: AppAutomationStatus? {
         if item.runningInstances.count > 1 {
             let statuses = item.runningInstances.compactMap { model.automationStatus(for: $0) }
@@ -3378,6 +3427,20 @@ struct AppRow: View {
                     helpText: model.localized(.statusInstancesQuitNotCompletedHelp)
                 )
             }
+            if let deferredCount = AppAutomationStatus.mixedDeferredInstanceCount(
+                statuses,
+                totalInstances: item.runningInstances.count
+            ) {
+                return AppAutomationStatus(
+                    text: model.localized(.statusInstancesDeferredMixed, replacements: [
+                        "deferredCount": String(deferredCount),
+                        "count": String(item.runningInstances.count)
+                    ]),
+                    isProtected: true,
+                    isDeferred: true,
+                    helpText: statuses.first(where: \.isDeferred)?.helpText
+                )
+            }
             if statuses.count == item.runningInstances.count,
                let firstStatus = statuses.first,
                 statuses.allSatisfy({ $0.text == firstStatus.text }) {
@@ -3387,6 +3450,7 @@ struct AppRow: View {
                         "status": firstStatus.text
                     ]),
                     isProtected: statuses.allSatisfy(\.isProtected),
+                    isDeferred: statuses.allSatisfy(\.isDeferred),
                     helpText: firstStatus.helpText
                 )
             }
@@ -3533,6 +3597,28 @@ struct AppRow: View {
                     "action": forceQuitMenuTitle,
                     "name": item.name
                 ]))
+
+                Divider()
+
+                Menu {
+                    ForEach(AppAutomationDeferralDuration.allCases, id: \.self) { duration in
+                        Button(model.localized(deferralDurationTitleKey(for: duration))) {
+                            model.deferAutomation(for: item, duration: duration)
+                        }
+                        .disabled(!model.canDeferAutomation(for: item))
+                    }
+                    if model.isAutomationDeferred(for: item) {
+                        Divider()
+                        Button(model.localized(.contextDeferEnd)) {
+                            model.endAutomationDeferral(for: item)
+                        }
+                    }
+                } label: {
+                    Label(
+                        model.localized(.contextDeferTitle),
+                        systemImage: "clock.arrow.circlepath"
+                    )
+                }
             }
         }
     }
