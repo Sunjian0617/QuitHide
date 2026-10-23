@@ -85,6 +85,7 @@ struct AppAutomationStatus {
     let isError: Bool
     let isWarning: Bool
     let isProtected: Bool
+    let isDeferred: Bool
     let helpText: String?
 
     init(
@@ -92,12 +93,14 @@ struct AppAutomationStatus {
         isError: Bool = false,
         isWarning: Bool = false,
         isProtected: Bool = false,
+        isDeferred: Bool = false,
         helpText: String? = nil
     ) {
         self.text = text
         self.isError = isError
         self.isWarning = isWarning
         self.isProtected = isProtected
+        self.isDeferred = isDeferred
         self.helpText = helpText
     }
 
@@ -276,6 +279,8 @@ final class AppModel: ObservableObject {
     private var forceQuitFailures: Set<String> = []
     private var quitDeadlineAttempted: Set<String> = []
     private var preQuitHideStates: [String: PreQuitHideRuntimeState] = [:]
+    @Published private var appAutomationDeferralRegistry =
+        AppAutomationDeferralRegistry()
     private var timingSuspension = TimingSuspension()
     private var automaticallyProtectedBundleIdentifiers: Set<String> = []
     private var stageManagerHoldReasonsByBundleIdentifier:
@@ -532,6 +537,47 @@ final class AppModel: ObservableObject {
         )
     }
 
+    func canDeferAutomation(for item: CatalogAppItem) -> Bool {
+        let hasUncancelableQuit = item.runningInstances.contains { instance in
+            quitRequestStates[instance.id] != nil ||
+                forceQuitOperationTokens[instance.id] != nil
+        }
+        return AppAutomationDeferralEligibilityPolicy.canDefer(
+            isRunning: item.isRunning,
+            actionIsAutomated: effectivePolicy(for: item.bundleIdentifier).isAutomated,
+            hasUncancelableQuit: hasUncancelableQuit
+        )
+    }
+
+    func deferAutomation(
+        for item: CatalogAppItem,
+        duration: AppAutomationDeferralDuration
+    ) {
+        guard canDeferAutomation(for: item) else { return }
+        var nextRegistry = appAutomationDeferralRegistry
+        nextRegistry.deferAutomation(
+            for: item.bundleIdentifier,
+            duration: duration,
+            at: effectiveNow
+        )
+        appAutomationDeferralRegistry = nextRegistry
+    }
+
+    func endAutomationDeferral(for item: CatalogAppItem) {
+        var nextRegistry = appAutomationDeferralRegistry
+        guard let reset = nextRegistry.endDeferral(
+            for: item.bundleIdentifier,
+            at: effectiveNow
+        ) else {
+            return
+        }
+        appAutomationDeferralRegistry = nextRegistry
+        resetAutomaticRuntimeState(
+            bundleIdentifier: reset.bundleIdentifier,
+            restartAt: reset.timerRestartAt
+        )
+    }
+
     func setPolicy(_ action: AutoAction, for bundleIdentifier: String) {
         guard isRuleRegistryWritable else {
             statusMessage = "规则来自更高版本，当前版本无法解析或修改"
@@ -553,6 +599,15 @@ final class AppModel: ObservableObject {
                     ?? AppRuleRegistry.fallbackDisplayName(for: bundleIdentifier),
                 lastKnownAppPath: catalogItem?.bundleURL?.path
             )
+        }
+        if !effectivePolicy(for: bundleIdentifier).isAutomated {
+            var nextRegistry = appAutomationDeferralRegistry
+            if nextRegistry.endDeferral(
+                for: bundleIdentifier,
+                at: effectiveNow
+            ) != nil {
+                appAutomationDeferralRegistry = nextRegistry
+            }
         }
         persistRuleRegistry()
         resetRuntimeState(
@@ -1163,6 +1218,13 @@ final class AppModel: ObservableObject {
             }
 
         let runningRuntimeIDs = Set(running.map(\.id))
+        let runningBundleIdentifiers = Set(running.map(\.bundleIdentifier))
+        var nextDeferralRegistry = appAutomationDeferralRegistry
+        if nextDeferralRegistry.removeStoppedApps(
+            runningBundleIdentifiers: runningBundleIdentifiers
+        ) {
+            appAutomationDeferralRegistry = nextDeferralRegistry
+        }
         let observationInstant = automationClock.now
         for item in running {
             let action = effectivePolicy(for: item.bundleIdentifier)
@@ -1865,12 +1927,27 @@ final class AppModel: ObservableObject {
         guard automationEnabled else { return }
 
         let now = effectiveNow
+        var nextDeferralRegistry = appAutomationDeferralRegistry
+        let expiredDeferrals = nextDeferralRegistry.expire(at: now)
+        if !expiredDeferrals.isEmpty {
+            appAutomationDeferralRegistry = nextDeferralRegistry
+            for reset in expiredDeferrals {
+                resetAutomaticRuntimeState(
+                    bundleIdentifier: reset.bundleIdentifier,
+                    restartAt: reset.timerRestartAt
+                )
+            }
+        }
 
         for item in apps {
             let bundleID = item.bundleIdentifier
             let runtimeID = item.id
             let action = effectivePolicy(for: bundleID)
             guard action.isAutomated,
+                  !appAutomationDeferralRegistry.isDeferred(
+                    for: bundleID,
+                    at: now
+                  ),
                   actionOperationTokens[runtimeID] == nil,
                   oneShotActionStates[runtimeID] == nil,
                   quitRequestStates[runtimeID] == nil,
@@ -2896,15 +2973,15 @@ final class AppModel: ObservableObject {
             transition.protectedBundleIdentifiers
 
         for bundleIdentifier in transition.enteredProtection {
-            clearAutomaticRuntimeStateForWindowProtection(
+            resetAutomaticRuntimeState(
                 bundleIdentifier: bundleIdentifier,
-                restartTimer: false
+                restartAt: nil
             )
         }
         for bundleIdentifier in transition.leftProtection {
-            clearAutomaticRuntimeStateForWindowProtection(
+            resetAutomaticRuntimeState(
                 bundleIdentifier: bundleIdentifier,
-                restartTimer: true
+                restartAt: effectiveNow
             )
         }
     }
@@ -2935,9 +3012,9 @@ final class AppModel: ObservableObject {
             nextReasonsByBundleIdentifier
     }
 
-    private func clearAutomaticRuntimeStateForWindowProtection(
+    private func resetAutomaticRuntimeState(
         bundleIdentifier: String,
-        restartTimer: Bool
+        restartAt: TimeInterval?
     ) {
         for item in apps where item.bundleIdentifier == bundleIdentifier {
             inactiveSince.removeValue(forKey: item.id)
@@ -2956,12 +3033,12 @@ final class AppModel: ObservableObject {
                 hideCompletionStates.removeValue(forKey: item.id)
             }
 
-            if restartTimer,
+            if let restartAt,
                shouldTrackIdleTime(
                    bundleIdentifier: item.bundleIdentifier,
                    isActive: item.isActive
                ) {
-                inactiveSince[item.id] = effectiveNow
+                inactiveSince[item.id] = restartAt
             }
         }
     }
@@ -2972,10 +3049,11 @@ final class AppModel: ObservableObject {
                 ? item.bundleIdentifier
                 : nil
         })
+        let restartAt = restartTimers ? effectiveNow : nil
         for bundleIdentifier in automatedBundleIdentifiers {
-            clearAutomaticRuntimeStateForWindowProtection(
+            resetAutomaticRuntimeState(
                 bundleIdentifier: bundleIdentifier,
-                restartTimer: restartTimers
+                restartAt: restartAt
             )
         }
     }
@@ -2997,6 +3075,9 @@ final class AppModel: ObservableObject {
             shifted.retryState.shiftRetryDate(by: suspendedDuration)
             return shifted
         }
+        var nextDeferralRegistry = appAutomationDeferralRegistry
+        nextDeferralRegistry.shiftDeadlines(by: suspendedDuration)
+        appAutomationDeferralRegistry = nextDeferralRegistry
     }
 
     private func handleApplicationUnhidden(
