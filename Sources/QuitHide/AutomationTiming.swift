@@ -34,6 +34,15 @@ enum RuntimeApplicationIdentity {
     }
 }
 
+enum ApplicationForegroundPolicy {
+    static func isActive(
+        processIdentifier: Int32,
+        frontmostProcessIdentifier: Int32?
+    ) -> Bool {
+        processIdentifier == frontmostProcessIdentifier
+    }
+}
+
 enum ApplicationUnhidePolicy {
     static func shouldRestartTimer(
         actionIsAutomated: Bool,

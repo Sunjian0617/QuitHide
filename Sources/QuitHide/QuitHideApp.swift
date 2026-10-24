@@ -3,6 +3,17 @@ import OSLog
 import ServiceManagement
 import SwiftUI
 
+private enum MenuLayout {
+    static let panelWidth: CGFloat = 360
+    static let settingsWidth: CGFloat = 432
+    static let horizontalInset: CGFloat = 12
+    static let ruleColumnWidth: CGFloat = 102
+    static let delayColumnWidth: CGFloat = 76
+    static let searchFieldWidth: CGFloat = 160
+    static let appIconSize: CGFloat = 24
+    static let rowSpacing: CGFloat = 6
+}
+
 struct ActionSymbol: View {
     let action: AutoAction
 
@@ -30,7 +41,21 @@ struct RunningAppItem: Identifiable {
     let icon: NSImage
     let isHidden: Bool
     let isActive: Bool
+    let hasVisibleWindowOnAnotherSpace: Bool
+    let parallelsVMProcessState: ParallelsVirtualMachineProcessState
+    let parallelsVirtualMachineIsInUse: Bool
+    let isParallelsVirtualMachineProcess: Bool
     let app: NSRunningApplication
+
+    var isProtectedByParallelsVM: Bool {
+        ParallelsVirtualMachineProtectionPolicy.shouldProtect(
+            bundleIdentifier: bundleIdentifier,
+            applicationURL: app.bundleURL,
+            processState: parallelsVMProcessState,
+            virtualMachineIsInUse: parallelsVirtualMachineIsInUse,
+            isVirtualMachineProcess: isParallelsVirtualMachineProcess
+        )
+    }
 }
 
 struct CatalogAppItem: Identifiable {
@@ -351,6 +376,9 @@ final class AppModel: ObservableObject {
         AutomaticWindowProtectionFailurePresentationTracker()
     private var automaticWindowProtectionGeneration = 0
     private var workspaceSessionIsActive = true
+    private var lastParallelsVirtualMachineProcessState:
+        ParallelsVirtualMachineProcessState = .unavailable
+    private var pendingParallelsDesktopQuitAfterVMStopToken: UUID?
     private var timer: Timer?
     private var observers: [NSObjectProtocol] = []
 
@@ -897,6 +925,24 @@ final class AppModel: ObservableObject {
             return nil
         }
 
+        if item.isProtectedByParallelsVM {
+            let vmUseCanBeVerified =
+                item.parallelsVMProcessState != .unavailable
+            return AppAutomationStatus(
+                text: localized(
+                    vmUseCanBeVerified
+                        ? .statusParallelsVMInUse
+                        : .statusParallelsVMUnavailable
+                ),
+                isProtected: true,
+                helpText: localized(
+                    vmUseCanBeVerified
+                        ? .statusParallelsVMInUseHelp
+                        : .statusParallelsVMUnavailableHelp
+                )
+            )
+        }
+
         if let failedAction = actionFailures[runtimeID] {
             let key: L10n.Key = retryStates[runtimeID]?.hasAttemptsRemaining == true
                 ? .statusActionFailedRetry
@@ -991,6 +1037,13 @@ final class AppModel: ObservableObject {
             return AppAutomationStatus(
                 text: localized(statusKey),
                 isError: false
+            )
+        }
+        if item.hasVisibleWindowOnAnotherSpace {
+            return AppAutomationStatus(
+                text: localized(.statusOtherDesktopWindow),
+                isProtected: true,
+                helpText: localized(.statusOtherDesktopWindowHelp)
             )
         }
         if item.isActive {
@@ -1298,12 +1351,49 @@ final class AppModel: ObservableObject {
 
     func refreshApps() {
         let ownBundleID = Bundle.main.bundleIdentifier
-        let runningApplications = NSWorkspace.shared.runningApplications
+        let parallelsProcessSnapshot =
+            SystemParallelsVirtualMachineProcessProvider.snapshot()
+        let frontmostApplication = NSWorkspace.shared.frontmostApplication
+        let frontmostProcessIdentifier =
+            frontmostApplication?.processIdentifier
+        let processesWithVisibleWindowsOnInactiveSpaces =
+            ApplicationInactiveSpaceVisibilityProvider
+            .processIdentifiersWithVisibleWindowsOnInactiveSpaces()
+        let workspaceRunningApplications = NSWorkspace.shared.runningApplications
+        let runningApplications = workspaceRunningApplications
             .filter { app in
                 app.activationPolicy == .regular &&
                 app.bundleIdentifier != ownBundleID &&
                 app.localizedName != nil
             }
+        let runningSharedApplicationProcessIdentifiers =
+            sharedWindowsApplicationProcessIdentifiers(
+                processSnapshot: parallelsProcessSnapshot,
+                workspaceApplications: workspaceRunningApplications,
+                frontmostApplication: frontmostApplication
+            )
+        if parallelsProcessSnapshot.state != .unavailable {
+            if ParallelsVirtualMachineProtectionPolicy
+                .shouldQuitParallelsAfterVirtualMachineStops(
+                    previousProcessState:
+                        lastParallelsVirtualMachineProcessState,
+                    currentProcessState: parallelsProcessSnapshot.state,
+                    runningSharedApplicationProcessIdentifiers:
+                        runningSharedApplicationProcessIdentifiers
+                ) {
+                scheduleParallelsDesktopQuitAfterVMStops()
+            }
+            lastParallelsVirtualMachineProcessState =
+                parallelsProcessSnapshot.state
+            if parallelsProcessSnapshot.state == .running {
+                pendingParallelsDesktopQuitAfterVMStopToken = nil
+            }
+        }
+        let parallelsVirtualMachineIsInUse =
+            ParallelsVirtualMachineProtectionPolicy.virtualMachineIsInUse(
+                runningSharedApplicationProcessIdentifiers:
+                    runningSharedApplicationProcessIdentifiers
+            )
         let running = runningApplications
             .compactMap { app -> RunningAppItem? in
                 guard let bundleID = app.bundleIdentifier,
@@ -1316,7 +1406,27 @@ final class AppModel: ObservableObject {
                     name: name,
                     icon: icon,
                     isHidden: app.isHidden,
-                    isActive: app.isActive,
+                    isActive: ApplicationForegroundPolicy.isActive(
+                        processIdentifier: app.processIdentifier,
+                        frontmostProcessIdentifier:
+                            frontmostProcessIdentifier
+                    ),
+                    hasVisibleWindowOnAnotherSpace:
+                        ParallelsVirtualMachineProtectionPolicy
+                            .shouldDeferAutomaticActionForInactiveSpaceWindow(
+                                bundleIdentifier: bundleID,
+                                applicationURL: app.bundleURL,
+                                hasVisibleWindowOnAnotherSpace:
+                                    processesWithVisibleWindowsOnInactiveSpaces
+                                        .contains(app.processIdentifier)
+                            ),
+                    parallelsVMProcessState: parallelsProcessSnapshot.state,
+                    parallelsVirtualMachineIsInUse:
+                        parallelsVirtualMachineIsInUse,
+                    isParallelsVirtualMachineProcess:
+                        parallelsProcessSnapshot.processIdentifiers.contains(
+                            Int32(app.processIdentifier)
+                        ),
                     app: app
                 )
             }
@@ -1324,6 +1434,27 @@ final class AppModel: ObservableObject {
                 if lhs.isActive != rhs.isActive { return lhs.isActive }
                 return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
             }
+
+        let previousParallelsProtection = Set(
+            apps.filter(\.isProtectedByParallelsVM).map(\.bundleIdentifier)
+        )
+        let currentParallelsProtection = Set(
+            running.filter(\.isProtectedByParallelsVM).map(\.bundleIdentifier)
+        )
+        for bundleIdentifier in currentParallelsProtection
+            .subtracting(previousParallelsProtection) {
+            resetAutomaticRuntimeState(
+                bundleIdentifier: bundleIdentifier,
+                restartAt: nil
+            )
+        }
+        for bundleIdentifier in previousParallelsProtection
+            .subtracting(currentParallelsProtection) {
+            resetAutomaticRuntimeState(
+                bundleIdentifier: bundleIdentifier,
+                restartAt: effectiveNow
+            )
+        }
 
         let runningRuntimeIDs = Set(running.map(\.id))
         let runningBundleIdentifiers = Set(running.map(\.bundleIdentifier))
@@ -1423,7 +1554,9 @@ final class AppModel: ObservableObject {
                 applicationIsActive: item.isActive,
                 applicationIsHeld: automaticallyProtectedBundleIdentifiers.contains(
                     item.bundleIdentifier
-                ),
+                ) || item.isProtectedByParallelsVM,
+                applicationHasVisibleWindowOnAnotherSpace:
+                    item.hasVisibleWindowOnAnotherSpace,
                 hasTimer: inactiveSince[item.id] != nil
             )
             switch timerDirective {
@@ -1456,6 +1589,102 @@ final class AppModel: ObservableObject {
         rebuildCatalog()
     }
 
+    private func sharedWindowsApplicationProcessIdentifiers(
+        processSnapshot: ParallelsVirtualMachineProcessSnapshot,
+        workspaceApplications: [NSRunningApplication],
+        frontmostApplication: NSRunningApplication?
+    ) -> Set<Int32> {
+        var processIdentifiers =
+            processSnapshot.sharedApplicationProcessIdentifiers
+        processIdentifiers.formUnion(
+            workspaceApplications.filter {
+                ParallelsVirtualMachineProtectionPolicy
+                    .isVirtualMachineApplication(
+                        bundleIdentifier: $0.bundleIdentifier,
+                        applicationURL: $0.bundleURL
+                    )
+            }.map(\.processIdentifier)
+        )
+        if let frontmostApplication,
+           ParallelsVirtualMachineProtectionPolicy
+                .isVirtualMachineApplication(
+                    bundleIdentifier: frontmostApplication.bundleIdentifier,
+                    applicationURL: frontmostApplication.bundleURL
+                ) {
+            processIdentifiers.insert(frontmostApplication.processIdentifier)
+        }
+        return processIdentifiers
+    }
+
+    private func scheduleParallelsDesktopQuitAfterVMStops() {
+        guard automationEnabled,
+              workspaceSessionIsActive,
+              pendingParallelsDesktopQuitAfterVMStopToken == nil else {
+            return
+        }
+
+        let token = UUID()
+        pendingParallelsDesktopQuitAfterVMStopToken = token
+        // Confirm the VM really stayed stopped. This protects a VM launch from
+        // a brief process inventory gap while still closing Parallels promptly.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
+            guard let self,
+                  self.pendingParallelsDesktopQuitAfterVMStopToken == token else {
+                return
+            }
+
+            let latestSnapshot =
+                SystemParallelsVirtualMachineProcessProvider.snapshot()
+            let workspaceApplications = NSWorkspace.shared.runningApplications
+            let sharedApplicationProcessIdentifiers =
+                self.sharedWindowsApplicationProcessIdentifiers(
+                    processSnapshot: latestSnapshot,
+                    workspaceApplications: workspaceApplications,
+                    frontmostApplication:
+                        NSWorkspace.shared.frontmostApplication
+                )
+            guard self.automationEnabled,
+                  ParallelsVirtualMachineProtectionPolicy
+                    .shouldQuitParallelsAfterVirtualMachineStops(
+                        previousProcessState: .running,
+                        currentProcessState: latestSnapshot.state,
+                        runningSharedApplicationProcessIdentifiers:
+                            sharedApplicationProcessIdentifiers
+                    ) else {
+                self.pendingParallelsDesktopQuitAfterVMStopToken = nil
+                return
+            }
+
+            self.pendingParallelsDesktopQuitAfterVMStopToken = nil
+            let dockHelpers = workspaceApplications.filter {
+                ParallelsVirtualMachineProtectionPolicy.isWindowsDockHelper(
+                    bundleIdentifier: $0.bundleIdentifier,
+                    applicationURL: $0.bundleURL
+                )
+            }
+            for dockHelper in dockHelpers where !dockHelper.isTerminated {
+                _ = dockHelper.terminate()
+            }
+            guard let parallelsDesktop = workspaceApplications.first(where: {
+                ParallelsVirtualMachineProtectionPolicy.isParallelsDesktop(
+                    bundleIdentifier: $0.bundleIdentifier ?? "",
+                    applicationURL: $0.bundleURL
+                )
+            }) else {
+                return
+            }
+            if parallelsDesktop.terminate() {
+                Self.logger.notice(
+                    "Requested Parallels Desktop to quit after its VM stopped"
+                )
+            } else {
+                Self.logger.error(
+                    "Parallels Desktop did not accept a normal quit request after its VM stopped"
+                )
+            }
+        }
+    }
+
     private func clearCompletedHideStateAfterObservedUnhide(
         for item: RunningAppItem,
         at eventInstant: TimeInterval
@@ -1475,7 +1704,8 @@ final class AppModel: ObservableObject {
             applicationIsHeld:
                 automaticallyProtectedBundleIdentifiers.contains(
                     item.bundleIdentifier
-                )
+                ) || item.hasVisibleWindowOnAnotherSpace ||
+                item.isProtectedByParallelsVM
         )
         if shouldRestartTimer {
             inactiveSince[item.id] =
@@ -1877,7 +2107,13 @@ final class AppModel: ObservableObject {
                 let runtimeID = self.runtimeIdentifier(for: app)
                 if self.shouldTrackIdleTime(
                     bundleIdentifier: bundleID,
-                    isActive: app.isActive
+                    isActive: app.isActive,
+                    hasVisibleWindowOnAnotherSpace:
+                        self.apps.first(where: { $0.id == runtimeID })?
+                            .hasVisibleWindowOnAnotherSpace ?? false,
+                    isProtectedByParallelsVM:
+                        self.apps.first(where: { $0.id == runtimeID })?
+                            .isProtectedByParallelsVM ?? false
                 ) {
                     self.inactiveSince[runtimeID] = self.effectiveNow
                 }
@@ -2051,7 +2287,9 @@ final class AppModel: ObservableObject {
                   quitRequestStates[runtimeID] == nil,
                   forceQuitOperationTokens[runtimeID] == nil,
                   !automaticallyProtectedBundleIdentifiers.contains(bundleID),
+                  !item.isProtectedByParallelsVM,
                   !item.isActive,
+                  !item.hasVisibleWindowOnAnotherSpace,
                   let inactiveAt = inactiveSince[runtimeID] else { continue }
 
             let elapsed = now - inactiveAt
@@ -2236,7 +2474,9 @@ final class AppModel: ObservableObject {
               forceQuitOperationTokens[runtimeID] == nil,
               !automaticallyProtectedBundleIdentifiers.contains(bundleID),
               let currentItem = apps.first(where: { $0.id == runtimeID }),
+              !currentItem.isProtectedByParallelsVM,
               !currentItem.isActive,
+              !currentItem.hasVisibleWindowOnAnotherSpace,
               let inactiveAt = inactiveSince[runtimeID] else {
             return nil
         }
@@ -2435,6 +2675,16 @@ final class AppModel: ObservableObject {
         if source.isAutomatic,
            !automaticWindowProtectionModeMatchesCurrentSystemState() {
             failClosedForWindowProtectionChange()
+            return
+        }
+        if source.isAutomatic,
+           apps.first(where: { $0.id == runtimeIdentifier })?
+                .isProtectedByParallelsVM == true {
+            resetAutomaticRuntimeState(
+                bundleIdentifier: bundleIdentifier,
+                restartAt: nil
+            )
+            refreshApps()
             return
         }
         guard StageManagerAutomaticActionPolicy.shouldAllow(
@@ -2699,10 +2949,14 @@ final class AppModel: ObservableObject {
 
     private func shouldTrackIdleTime(
         bundleIdentifier: String,
-        isActive: Bool
+        isActive: Bool,
+        hasVisibleWindowOnAnotherSpace: Bool = false,
+        isProtectedByParallelsVM: Bool = false
     ) -> Bool {
         effectivePolicy(for: bundleIdentifier).isAutomated &&
             !isActive &&
+            !hasVisibleWindowOnAnotherSpace &&
+            !isProtectedByParallelsVM &&
             !automaticallyProtectedBundleIdentifiers.contains(bundleIdentifier)
     }
 
@@ -3295,7 +3549,11 @@ final class AppModel: ObservableObject {
             if let restartAt,
                shouldTrackIdleTime(
                    bundleIdentifier: item.bundleIdentifier,
-                   isActive: item.isActive
+                   isActive: item.isActive,
+                   hasVisibleWindowOnAnotherSpace:
+                       item.hasVisibleWindowOnAnotherSpace,
+                   isProtectedByParallelsVM:
+                       item.isProtectedByParallelsVM
                ) {
                 inactiveSince[item.id] = restartAt
             }
@@ -3361,7 +3619,11 @@ final class AppModel: ObservableObject {
             actionIsAutomated: effectivePolicy(for: bundleIdentifier).isAutomated,
             applicationIsActive: app.isActive,
             applicationIsHeld:
-                automaticallyProtectedBundleIdentifiers.contains(bundleIdentifier)
+                automaticallyProtectedBundleIdentifiers.contains(bundleIdentifier) ||
+                apps.first(where: { $0.id == runtimeIdentifier })?
+                    .hasVisibleWindowOnAnotherSpace == true ||
+                apps.first(where: { $0.id == runtimeIdentifier })?
+                    .isProtectedByParallelsVM == true
         )
         if shouldRestartTimer {
             inactiveSince[runtimeIdentifier] = timingSuspension.effectiveNow(at: eventInstant)
@@ -3387,7 +3649,11 @@ final class AppModel: ObservableObject {
             if restartTimer,
                shouldTrackIdleTime(
                    bundleIdentifier: item.bundleIdentifier,
-                   isActive: item.isActive
+                   isActive: item.isActive,
+                   hasVisibleWindowOnAnotherSpace:
+                       item.hasVisibleWindowOnAnotherSpace,
+                   isProtectedByParallelsVM:
+                       item.isProtectedByParallelsVM
                ) {
                 inactiveSince[item.id] = effectiveNow
             } else {
@@ -3428,7 +3694,11 @@ final class AppModel: ObservableObject {
             if restartTimer,
                shouldTrackIdleTime(
                    bundleIdentifier: item.bundleIdentifier,
-                   isActive: item.isActive
+                   isActive: item.isActive,
+                   hasVisibleWindowOnAnotherSpace:
+                       item.hasVisibleWindowOnAnotherSpace,
+                   isProtectedByParallelsVM:
+                       item.isProtectedByParallelsVM
                ) {
                 inactiveSince[item.id] = effectiveNow
             } else {
@@ -3720,10 +3990,13 @@ struct AppRow: View {
     }
 
     var body: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: MenuLayout.rowSpacing) {
             Image(nsImage: item.icon)
                 .resizable()
-                .frame(width: 28, height: 28)
+                .frame(
+                    width: MenuLayout.appIconSize,
+                    height: MenuLayout.appIconSize
+                )
                 .saturation(item.isRunning ? 1 : 0)
                 .opacity(item.isRunning ? 1 : 0.48)
 
@@ -3741,7 +4014,7 @@ struct AppRow: View {
             }
             .layoutPriority(1)
 
-            Spacer(minLength: 8)
+            Spacer(minLength: 4)
 
             Picker(model.localized(.rowRuleLabel), selection: Binding(
                 get: { explicitAction },
@@ -3760,7 +4033,7 @@ struct AppRow: View {
                 }
             }
             .labelsHidden()
-            .frame(width: 116)
+            .frame(width: MenuLayout.ruleColumnWidth)
             .disabled(!model.rulesAreEditable)
             .help(model.localized(.rowRuleHelp, replacements: ["name": item.name]))
             .accessibilityLabel(model.localized(.a11yRuleForApp, replacements: [
@@ -3799,9 +4072,9 @@ struct AppRow: View {
                     .disabled(!model.rulesAreEditable)
                 }
             }
-            .frame(width: 90)
+            .frame(width: MenuLayout.delayColumnWidth)
         }
-        .frame(minHeight: 40)
+        .frame(minHeight: 36)
         .contentShape(Rectangle())
         .contextMenu {
             if item.isRunning {
@@ -4285,8 +4558,8 @@ struct SettingsSheet: View {
                 .font(.caption)
             }
         }
-        .padding(24)
-        .frame(width: 480)
+        .padding(20)
+        .frame(width: MenuLayout.settingsWidth)
         .environment(\.locale, model.effectiveLocale)
         .background {
             SettingsWindowConfigurator(title: model.localized(.settingsTitle))
@@ -4652,7 +4925,7 @@ struct MenuContentView: View {
             HStack(spacing: 8) {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("QuitHide")
-                        .font(.system(size: 20, weight: .semibold))
+                        .font(.system(size: 18, weight: .semibold))
                     Text(model.localized(.menuSubtitle))
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -4679,7 +4952,7 @@ struct MenuContentView: View {
                     Image(systemName: model.automationEnabled ? "pause.fill" : "play.fill")
                         .font(.system(size: 12, weight: .semibold))
                         .foregroundStyle(model.automationEnabled ? Color.secondary : Color.orange)
-                        .frame(width: 28, height: 28)
+                        .frame(width: 26, height: 26)
                         .background(
                             Color.primary.opacity(0.07),
                             in: Circle()
@@ -4706,14 +4979,15 @@ struct MenuContentView: View {
                     Image(systemName: "gearshape")
                         .font(.system(size: 16, weight: .medium))
                         .foregroundStyle(.secondary)
-                        .frame(width: 28, height: 28)
+                        .frame(width: 26, height: 26)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .help(model.localized(.menuSettings))
                 .accessibilityLabel(model.localized(.a11ySettings))
             }
-            .padding(16)
+            .padding(.horizontal, MenuLayout.horizontalInset)
+            .padding(.vertical, 12)
 
             HStack(spacing: 4) {
                 scopeButton(
@@ -4799,7 +5073,7 @@ struct MenuContentView: View {
                     }
                 }
                 .padding(.horizontal, 8)
-                .frame(width: 190, height: 28)
+                .frame(width: MenuLayout.searchFieldWidth, height: 24)
                 .contentShape(
                     RoundedRectangle(cornerRadius: 7, style: .continuous)
                 )
@@ -4834,8 +5108,8 @@ struct MenuContentView: View {
                 )
                 .animation(.easeOut(duration: 0.12), value: isSearchFocused)
             }
-            .padding(.horizontal, 16)
-            .padding(.bottom, 10)
+            .padding(.horizontal, MenuLayout.horizontalInset)
+            .padding(.bottom, 8)
 
             if let updateVersion = updateController.pendingUpdateVersion {
                 VStack(alignment: .leading, spacing: 8) {
@@ -4867,8 +5141,8 @@ struct MenuContentView: View {
                     RoundedRectangle(cornerRadius: 9, style: .continuous)
                         .stroke(Color.blue.opacity(0.20), lineWidth: 0.5)
                 }
-                .padding(.horizontal, 16)
-                .padding(.bottom, 10)
+                .padding(.horizontal, MenuLayout.horizontalInset)
+                .padding(.bottom, 8)
                 .fixedSize(horizontal: false, vertical: true)
                 .transition(.opacity.combined(with: .move(edge: .top)))
             }
@@ -4878,7 +5152,7 @@ struct MenuContentView: View {
             if scopedApps.isEmpty {
                 VStack(spacing: 10) {
                     Image(systemName: "app.dashed")
-                        .font(.system(size: 34))
+                        .font(.system(size: 32))
                         .foregroundStyle(.secondary)
 
                     Text(emptyStateTitle)
@@ -4940,9 +5214,9 @@ struct MenuContentView: View {
                             }
                         }
                     }
-                    .padding(.horizontal, 16)
-                    .padding(.top, 5)
-                    .padding(.bottom, 9)
+                    .padding(.horizontal, MenuLayout.horizontalInset)
+                    .padding(.top, 4)
+                    .padding(.bottom, 8)
                 }
                 .frame(minHeight: 0)
                 .id(listIdentity)
@@ -4960,7 +5234,7 @@ struct MenuContentView: View {
                             Spacer()
                         }
 
-                        HStack(spacing: 10) {
+                        HStack(spacing: 8) {
                             Button {
                                 model.performConfiguredApps(.hide)
                             } label: {
@@ -5021,11 +5295,11 @@ struct MenuContentView: View {
                         .help(model.localized(.menuQuitApp))
                     }
                 }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 12)
+                .padding(.horizontal, MenuLayout.horizontalInset)
+                .padding(.vertical, 9)
             }
         }
-        .frame(width: 440, height: menuHeight, alignment: .top)
+        .frame(width: MenuLayout.panelWidth, height: menuHeight, alignment: .top)
         .environment(\.locale, model.effectiveLocale)
         .animation(.easeOut(duration: 0.18), value: updateController.pendingUpdateVersion)
         .allowsHitTesting(pendingForceQuitRequest == nil)
@@ -5126,8 +5400,8 @@ struct MenuContentView: View {
             ]))
                 .font(.caption.weight(isSelected ? .semibold : .regular))
                 .foregroundStyle(isSelected ? Color.primary : Color.secondary)
-                .padding(.horizontal, 10)
-                .frame(height: 28)
+                .padding(.horizontal, 8)
+                .frame(height: 24)
                 .background(
                     isSelected ? Color.primary.opacity(0.09) : Color.clear,
                     in: Capsule()
@@ -5174,8 +5448,8 @@ struct MenuContentView: View {
 
             Spacer()
         }
-        .frame(height: 24)
-        .padding(.top, 4)
+        .frame(height: 21)
+        .padding(.top, 2)
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(.isHeader)
     }
@@ -5238,7 +5512,7 @@ struct MenuContentView: View {
             if index < items.count - 1 {
                 Divider()
                     .opacity(0.55)
-                    .padding(.leading, 38)
+                    .padding(.leading, 32)
             }
         }
     }

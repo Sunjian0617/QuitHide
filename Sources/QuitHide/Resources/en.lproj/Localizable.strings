@@ -105,6 +105,12 @@
 "status.action.failed_retry" = "{action} Failed · Will Retry";
 "status.action.failed_manual" = "{action} Failed · Try Manually";
 "status.active" = "In Use · Waiting to Start";
+"status.other_desktop_window" = "Open on Another Desktop · Timer Paused";
+"status.other_desktop_window.help" = "A visible window exists on another desktop. QuitHide pauses the automatic hide or quit timer until that desktop is active or the window is closed.";
+"status.parallels_vm.in_use" = "Virtual Machine Running · Parallels Stays Open";
+"status.parallels_vm.in_use.help" = "QuitHide keeps Parallels Desktop open while the VM process runs. Windows apps in Parallels keep the VM in use; after all of them close, the VM's own countdown can finish. When its process stops, QuitHide requests a normal quit for Parallels Desktop.";
+"status.parallels_vm.unavailable" = "Virtual Machine State Unknown · Automation Paused";
+"status.parallels_vm.unavailable.help" = "QuitHide cannot currently verify whether a Parallels virtual machine is running, so it pauses automatic hide and quit for Parallels Desktop until the state can be checked.";
 "status.in_use" = "In Use";
 "status.stage_manager.group_protected" = "Protected by Stage Manager Group";
 "status.app_deferral.active" = "Manual deferral · {time} left";

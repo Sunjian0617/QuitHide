@@ -106,6 +106,246 @@ expect(
     "active or unconfigured apps do not start an unhide timer"
 )
 
+let parallelsVMRunning = ParallelsVirtualMachineProtectionPolicy.processState(
+    executableNames: Set(["prl_vm_app"])
+)
+let windowsAppIsRunning =
+    ParallelsVirtualMachineProtectionPolicy.virtualMachineIsInUse(
+        runningSharedApplicationProcessIdentifiers: [101]
+    )
+let parallelsDesktopIsProtected =
+    ParallelsVirtualMachineProtectionPolicy.shouldProtect(
+        bundleIdentifier: ParallelsVirtualMachineProtectionPolicy
+            .desktopBundleIdentifier,
+        processState: parallelsVMRunning,
+        virtualMachineIsInUse: windowsAppIsRunning
+    )
+expect(
+    windowsAppIsRunning &&
+        parallelsDesktopIsProtected &&
+        ApplicationIdleTimerPolicy.directive(
+            actionIsAutomated: true,
+            applicationIsActive: false,
+            applicationIsHeld: parallelsDesktopIsProtected,
+            hasTimer: true
+        ) == .clear,
+    "a running Windows app clears Parallels Desktop's idle timer"
+)
+let idleVMKeepsParallelsOpen =
+    ParallelsVirtualMachineProtectionPolicy.shouldProtect(
+        bundleIdentifier: ParallelsVirtualMachineProtectionPolicy
+            .desktopBundleIdentifier,
+        processState: parallelsVMRunning,
+        virtualMachineIsInUse: false
+    )
+expect(
+    idleVMKeepsParallelsOpen &&
+        ApplicationIdleTimerPolicy.directive(
+            actionIsAutomated: true,
+            applicationIsActive: false,
+            applicationIsHeld: idleVMKeepsParallelsOpen,
+            hasTimer: false
+        ) == .clear,
+    "a running Parallels VM gets its own timer before the desktop can quit"
+)
+expect(
+    ParallelsVirtualMachineProtectionPolicy.shouldProtect(
+        bundleIdentifier: ParallelsVirtualMachineProtectionPolicy
+            .desktopBundleIdentifier,
+        processState: .stopped,
+        virtualMachineIsInUse: true
+    ),
+    "a running Windows app protects Parallels during VM startup"
+)
+expect(
+    ParallelsVirtualMachineProtectionPolicy.shouldProtect(
+        bundleIdentifier:
+            "com.parallels.winapp.07a094a210794e74a0e5e1a1457a92ee.3ee4fe402df84873871f0f278370168d",
+        processState: .running,
+        virtualMachineIsInUse: true
+    ),
+    "an active Parallels shared Windows app does not get an idle timer"
+)
+expect(
+    !ParallelsVirtualMachineProtectionPolicy.shouldProtect(
+        bundleIdentifier:
+            "com.parallels.winapp.07a094a210794e74a0e5e1a1457a92ee.3ee4fe402df84873871f0f278370168d",
+        processState: .running,
+        virtualMachineIsInUse: false
+    ),
+    "an idle Parallels shared Windows app can still reach its timer"
+)
+let backgroundWindowsAppKeepsVMInUse =
+    ParallelsVirtualMachineProtectionPolicy.virtualMachineIsInUse(
+        runningSharedApplicationProcessIdentifiers: [101]
+    )
+expect(
+    backgroundWindowsAppKeepsVMInUse &&
+        ParallelsVirtualMachineProtectionPolicy.shouldProtect(
+            bundleIdentifier: ParallelsVirtualMachineProtectionPolicy
+                .desktopBundleIdentifier,
+            processState: parallelsVMRunning,
+            virtualMachineIsInUse: backgroundWindowsAppKeepsVMInUse
+        ) &&
+        ParallelsVirtualMachineProtectionPolicy.shouldProtect(
+            bundleIdentifier:
+                "com.parallels.winapp.8c4731f1a5288444bb2510ff8d967cc3.3ee4fe402df84873871f0f278370168d.fs",
+            processState: parallelsVMRunning,
+            virtualMachineIsInUse: backgroundWindowsAppKeepsVMInUse
+        ) && !ParallelsVirtualMachineProtectionPolicy.shouldProtect(
+            bundleIdentifier:
+                "com.parallels.winapp.8c4731f1a5288444bb2510ff8d967cc3.3ee4fe402df84873871f0f278370168d.fs",
+            processState: parallelsVMRunning,
+            virtualMachineIsInUse: false
+        ),
+    "a background Windows app protects the Windows helper and Parallels Desktop"
+)
+expect(
+    ParallelsVirtualMachineProtectionPolicy.isVirtualMachineApplication(
+        bundleIdentifier:
+            "com.parallels.winapp.07a094a210794e74a0e5e1a1457a92ee.3ee4fe402df84873871f0f278370168d"
+    ),
+    "Parallels shared apps are recognized when their bundle URL is missing"
+)
+expect(
+    !ParallelsVirtualMachineProtectionPolicy.isVirtualMachineApplication(
+        bundleIdentifier:
+            "com.parallels.winapp.8c4731f1a5288444bb2510ff8d967cc3.3ee4fe402df84873871f0f278370168d.fs"
+    ) && !ParallelsVirtualMachineProtectionPolicy.isVirtualMachineApplication(
+        applicationURL: URL(
+            fileURLWithPath:
+                "/Users/test/Applications (Parallels)/{vm-id} Applications.localized/Windows 11 Dock Helper.app/Contents/MacOS/Windows 11 Dock Helper"
+        )
+    ),
+    "the Parallels Windows Dock Helper is not a guest application"
+)
+expect(
+    ParallelsVirtualMachineProtectionPolicy.shouldProtect(
+        bundleIdentifier: ParallelsVirtualMachineProtectionPolicy
+            .desktopBundleIdentifier,
+        processState: ParallelsVirtualMachineProtectionPolicy.processState(
+            executableNames: nil
+        )
+    ),
+    "unknown VM state fails closed for Parallels Desktop"
+)
+expect(
+    !ParallelsVirtualMachineProtectionPolicy.virtualMachineIsInUse(
+        runningSharedApplicationProcessIdentifiers: []
+    ),
+    "a frontmost VM process alone does not imply Windows apps are in use"
+)
+expect(
+    ParallelsVirtualMachineProtectionPolicy.virtualMachineIsInUse(
+        runningSharedApplicationProcessIdentifiers: [101]
+    ),
+    "a background Windows app remains protected regardless of Space"
+)
+expect(
+    !ParallelsVirtualMachineProtectionPolicy.shouldProtect(
+        bundleIdentifier:
+            ParallelsVirtualMachineProtectionPolicy.desktopBundleIdentifier,
+        processState: .running,
+        virtualMachineIsInUse: false,
+        isVirtualMachineProcess: true
+    ) && ParallelsVirtualMachineProtectionPolicy.shouldProtect(
+        bundleIdentifier:
+            ParallelsVirtualMachineProtectionPolicy.desktopBundleIdentifier,
+        processState: .running,
+        virtualMachineIsInUse: true,
+        isVirtualMachineProcess: true
+    ) && ApplicationIdleTimerPolicy.directive(
+        actionIsAutomated: true,
+        applicationIsActive: false,
+        applicationIsHeld: false,
+        hasTimer: false
+    ) == .startNow,
+    "closing the last Windows app lets the VM's own timer run"
+)
+expect(
+    ParallelsVirtualMachineProtectionPolicy
+        .shouldQuitParallelsAfterVirtualMachineStops(
+            previousProcessState: .running,
+            currentProcessState: .stopped,
+            runningSharedApplicationProcessIdentifiers: []
+        ) && !ParallelsVirtualMachineProtectionPolicy
+            .shouldQuitParallelsAfterVirtualMachineStops(
+                previousProcessState: .running,
+                currentProcessState: .stopped,
+                runningSharedApplicationProcessIdentifiers: [102]
+            ) && !ParallelsVirtualMachineProtectionPolicy
+            .shouldQuitParallelsAfterVirtualMachineStops(
+                previousProcessState: .stopped,
+                currentProcessState: .stopped,
+                runningSharedApplicationProcessIdentifiers: []
+            ) && !ParallelsVirtualMachineProtectionPolicy
+            .shouldQuitParallelsAfterVirtualMachineStops(
+                previousProcessState: .unavailable,
+                currentProcessState: .stopped,
+                runningSharedApplicationProcessIdentifiers: []
+            ) && !ParallelsVirtualMachineProtectionPolicy
+            .shouldQuitParallelsAfterVirtualMachineStops(
+                previousProcessState: .running,
+                currentProcessState: .unavailable,
+                runningSharedApplicationProcessIdentifiers: []
+            ),
+    "Parallels Desktop quits only after a verified VM stop with no Windows apps"
+)
+expect(
+    !ParallelsVirtualMachineProtectionPolicy.virtualMachineIsInUse(
+        runningSharedApplicationProcessIdentifiers: []
+    ),
+    "a Parallels desktop window alone does not imply Windows apps are in use"
+)
+expect(
+    !ParallelsVirtualMachineProtectionPolicy.virtualMachineIsInUse(
+        runningSharedApplicationProcessIdentifiers: []
+    ),
+    "a Parallels window on another Space alone does not imply Windows use"
+)
+let parallelsWindowShouldDefer =
+    ParallelsVirtualMachineProtectionPolicy
+        .shouldDeferAutomaticActionForInactiveSpaceWindow(
+            bundleIdentifier: ParallelsVirtualMachineProtectionPolicy
+                .desktopBundleIdentifier,
+            hasVisibleWindowOnAnotherSpace: true
+        )
+expect(
+    !parallelsWindowShouldDefer &&
+        !ParallelsVirtualMachineProtectionPolicy
+            .shouldDeferAutomaticActionForInactiveSpaceWindow(
+                bundleIdentifier:
+                    "com.parallels.winapp.8c4731f1a5288444bb2510ff8d967cc3.3ee4fe402df84873871f0f278370168d.fs",
+                hasVisibleWindowOnAnotherSpace: true
+            ) &&
+        ParallelsVirtualMachineProtectionPolicy
+            .shouldDeferAutomaticActionForInactiveSpaceWindow(
+                bundleIdentifier:
+                    "com.parallels.winapp.07a094a210794e74a0e5e1a1457a92ee.3ee4fe402df84873871f0f278370168d",
+                hasVisibleWindowOnAnotherSpace: true
+            ),
+    "Parallels infrastructure windows do not block idle timers on another Space"
+)
+expect(
+    ApplicationIdleTimerPolicy.directive(
+        actionIsAutomated: true,
+        applicationIsActive: false,
+        applicationIsHeld: false,
+        applicationHasVisibleWindowOnAnotherSpace:
+            parallelsWindowShouldDefer,
+        hasTimer: false
+    ) == .startNow,
+    "an idle Parallels app starts its timer despite a window on another Space"
+)
+expect(
+    !ParallelsVirtualMachineProtectionPolicy.shouldProtect(
+        bundleIdentifier: "com.example.editor",
+        processState: parallelsVMRunning,
+        virtualMachineIsInUse: true
+    ),
+    "a running Parallels VM does not pause unrelated apps"
+)
+
 expect(
     HideActionPresentationPolicy.presentation(
         isHidden: false,

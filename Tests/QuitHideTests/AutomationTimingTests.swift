@@ -135,6 +135,87 @@ struct ApplicationUnhidePolicyTests {
     }
 }
 
+@Suite("Application foreground policy")
+struct ApplicationForegroundPolicyTests {
+    @Test("The workspace frontmost process is marked active and clears its idle timer")
+    func frontmostProcessClearsIdleTimer() {
+        let applicationIsActive = ApplicationForegroundPolicy.isActive(
+            processIdentifier: 42,
+            frontmostProcessIdentifier: 42
+        )
+
+        #expect(applicationIsActive)
+        #expect(ApplicationIdleTimerPolicy.directive(
+            actionIsAutomated: true,
+            applicationIsActive: applicationIsActive,
+            applicationIsHeld: false,
+            hasTimer: true
+        ) == .clear)
+    }
+
+    @Test("Another process is not considered frontmost")
+    func nonFrontmostProcessDoesNotMatch() {
+        #expect(!ApplicationForegroundPolicy.isActive(
+            processIdentifier: 41,
+            frontmostProcessIdentifier: 42
+        ))
+    }
+
+    @Test("An unknown frontmost process does not mark a running app active")
+    func missingFrontmostProcessDoesNotMatch() {
+        #expect(!ApplicationForegroundPolicy.isActive(
+            processIdentifier: 42,
+            frontmostProcessIdentifier: nil
+        ))
+    }
+}
+
+@Suite("Application inactive-space visibility policy")
+struct ApplicationInactiveSpaceVisibilityPolicyTests {
+    @Test("Visible windows on another desktop identify and protect their app")
+    func visibleInactiveSpaceWindowIdentifiesItsOwner() {
+        let processIdentifiers = ApplicationInactiveSpaceVisibilityPolicy
+            .processIdentifiersWithVisibleWindowsOnInactiveSpaces(
+                activeSpaceWindowIDs: [10, 20],
+                allSpaceWindowIDs: [10, 20, 30, 40],
+                windowOwners: [10: 1, 20: 2, 30: 42]
+            )
+
+        #expect(processIdentifiers == [42])
+        #expect(ApplicationIdleTimerPolicy.directive(
+            actionIsAutomated: true,
+            applicationIsActive: false,
+            applicationIsHeld: false,
+            applicationHasVisibleWindowOnAnotherSpace: true,
+            hasTimer: true
+        ) == .clear)
+    }
+
+    @Test("An app with windows only in the active desktop is not protected")
+    func activeSpaceWindowDoesNotCountAsInactiveSpacePresence() {
+        let processIdentifiers = ApplicationInactiveSpaceVisibilityPolicy
+            .processIdentifiersWithVisibleWindowsOnInactiveSpaces(
+                activeSpaceWindowIDs: [10, 20],
+                allSpaceWindowIDs: [10, 20],
+                windowOwners: [10: 42, 20: 7]
+            )
+
+        #expect(processIdentifiers.isEmpty)
+    }
+
+    @Test("Window IDs without an owner are ignored")
+    func missingWindowOwnerIsIgnored() {
+        let processIdentifiers = ApplicationInactiveSpaceVisibilityPolicy
+            .processIdentifiersWithVisibleWindowsOnInactiveSpaces(
+                activeSpaceWindowIDs: [],
+                allSpaceWindowIDs: [30],
+                windowOwners: [:]
+            )
+
+        #expect(processIdentifiers.isEmpty)
+    }
+}
+
 @Suite("Hide action runtime state")
 struct HideActionRuntimeStateTests {
     @Test("Only a real operation is presented as in progress")

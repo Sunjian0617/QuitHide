@@ -105,6 +105,12 @@
 "status.action.failed_retry" = "{action}失败 · 稍后重试";
 "status.action.failed_manual" = "{action}失败 · 请手动重试";
 "status.active" = "使用中 · 离开后计时";
+"status.other_desktop_window" = "其他桌面有窗口 · 暂停计时";
+"status.other_desktop_window.help" = "应用窗口在其他桌面可见。QuitHide 会暂停该应用的自动隐藏或退出计时；切回当前桌面或关闭该窗口后恢复计时。";
+"status.parallels_vm.in_use" = "虚拟机正在运行 · 保持 Parallels 打开";
+"status.parallels_vm.in_use.help" = "虚拟机进程运行期间，QuitHide 会保持 Parallels Desktop 打开。Parallels 中的 Windows 应用会让虚拟机保持使用状态；这些应用全部退出后，虚拟机自己的倒计时可以结束。虚拟机进程停止后，QuitHide 会正常请求退出 Parallels Desktop。";
+"status.parallels_vm.unavailable" = "虚拟机状态无法确认 · 自动操作已暂停";
+"status.parallels_vm.unavailable.help" = "QuitHide 暂时无法确认 Parallels 虚拟机状态，因此暂停 Parallels Desktop 的自动隐藏和自动退出。稍后确认状态后再恢复计时。";
 "status.in_use" = "使用中";
 "status.stage_manager.group_protected" = "台前调度分组保护中";
 "status.app_deferral.active" = "手动延期 · 还剩 {time}";
