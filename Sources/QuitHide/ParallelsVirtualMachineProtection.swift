@@ -13,6 +13,65 @@ struct ParallelsVirtualMachineProcessSnapshot {
     let sharedApplicationProcessIdentifiers: Set<Int32>
 }
 
+enum ParallelsDesktopStopCleanupDecision: Equatable {
+    case none
+    case schedule
+    case retry
+    case cancel
+    case quit
+}
+
+struct ParallelsDesktopStopCleanupTracker {
+    private(set) var lastKnownProcessState:
+        ParallelsVirtualMachineProcessState = .unavailable
+    private(set) var isPending = false
+
+    mutating func observe(
+        _ currentProcessState: ParallelsVirtualMachineProcessState
+    ) -> ParallelsDesktopStopCleanupDecision {
+        switch currentProcessState {
+        case .unavailable:
+            return isPending ? .retry : .none
+        case .running:
+            lastKnownProcessState = .running
+            guard isPending else { return .none }
+            isPending = false
+            return .cancel
+        case .stopped:
+            let previousProcessState = lastKnownProcessState
+            lastKnownProcessState = .stopped
+            guard previousProcessState == .running else {
+                return isPending ? .retry : .none
+            }
+            isPending = true
+            return .schedule
+        }
+    }
+
+    mutating func verify(
+        processState: ParallelsVirtualMachineProcessState,
+        runningSharedApplicationProcessIdentifiers: Set<Int32>
+    ) -> ParallelsDesktopStopCleanupDecision {
+        guard isPending else { return .none }
+
+        switch processState {
+        case .unavailable:
+            return .retry
+        case .running:
+            lastKnownProcessState = .running
+            isPending = false
+            return .cancel
+        case .stopped:
+            lastKnownProcessState = .stopped
+            guard runningSharedApplicationProcessIdentifiers.isEmpty else {
+                return .retry
+            }
+            isPending = false
+            return .quit
+        }
+    }
+}
+
 enum ParallelsVirtualMachineProtectionPolicy {
     static let desktopBundleIdentifier = "com.parallels.desktop.console"
     static let sharedApplicationBundleIdentifierPrefix = "com.parallels.winapp."
@@ -159,15 +218,6 @@ enum ParallelsVirtualMachineProtectionPolicy {
         !runningSharedApplicationProcessIdentifiers.isEmpty
     }
 
-    static func shouldQuitParallelsAfterVirtualMachineStops(
-        previousProcessState: ParallelsVirtualMachineProcessState,
-        currentProcessState: ParallelsVirtualMachineProcessState,
-        runningSharedApplicationProcessIdentifiers: Set<Int32>
-    ) -> Bool {
-        previousProcessState == .running &&
-            currentProcessState == .stopped &&
-            runningSharedApplicationProcessIdentifiers.isEmpty
-    }
 }
 
 enum SystemParallelsVirtualMachineProcessProvider {

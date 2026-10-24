@@ -262,34 +262,51 @@ expect(
     ) == .startNow,
     "closing the last Windows app lets the VM's own timer run"
 )
+var parallelsStopCleanup = ParallelsDesktopStopCleanupTracker()
 expect(
-    ParallelsVirtualMachineProtectionPolicy
-        .shouldQuitParallelsAfterVirtualMachineStops(
-            previousProcessState: .running,
-            currentProcessState: .stopped,
+    parallelsStopCleanup.observe(.running) == .none &&
+        parallelsStopCleanup.observe(.stopped) == .schedule &&
+        parallelsStopCleanup.verify(
+            processState: .stopped,
+            runningSharedApplicationProcessIdentifiers: [102]
+        ) == .retry &&
+        parallelsStopCleanup.verify(
+            processState: .stopped,
             runningSharedApplicationProcessIdentifiers: []
-        ) && !ParallelsVirtualMachineProtectionPolicy
-            .shouldQuitParallelsAfterVirtualMachineStops(
-                previousProcessState: .running,
-                currentProcessState: .stopped,
-                runningSharedApplicationProcessIdentifiers: [102]
-            ) && !ParallelsVirtualMachineProtectionPolicy
-            .shouldQuitParallelsAfterVirtualMachineStops(
-                previousProcessState: .stopped,
-                currentProcessState: .stopped,
-                runningSharedApplicationProcessIdentifiers: []
-            ) && !ParallelsVirtualMachineProtectionPolicy
-            .shouldQuitParallelsAfterVirtualMachineStops(
-                previousProcessState: .unavailable,
-                currentProcessState: .stopped,
-                runningSharedApplicationProcessIdentifiers: []
-            ) && !ParallelsVirtualMachineProtectionPolicy
-            .shouldQuitParallelsAfterVirtualMachineStops(
-                previousProcessState: .running,
-                currentProcessState: .unavailable,
-                runningSharedApplicationProcessIdentifiers: []
-            ),
-    "Parallels Desktop quits only after a verified VM stop with no Windows apps"
+        ) == .quit &&
+        parallelsStopCleanup.verify(
+            processState: .stopped,
+            runningSharedApplicationProcessIdentifiers: []
+        ) == .none,
+    "Parallels stop cleanup retries until the last Windows app exits"
+)
+var unavailableParallelsStopCleanup = ParallelsDesktopStopCleanupTracker()
+expect(
+    unavailableParallelsStopCleanup.observe(.running) == .none &&
+        unavailableParallelsStopCleanup.observe(.stopped) == .schedule &&
+        unavailableParallelsStopCleanup.verify(
+            processState: .unavailable,
+            runningSharedApplicationProcessIdentifiers: []
+        ) == .retry &&
+        unavailableParallelsStopCleanup.verify(
+            processState: .stopped,
+            runningSharedApplicationProcessIdentifiers: []
+        ) == .quit,
+    "an unavailable VM snapshot keeps pending Parallels cleanup alive"
+)
+var restartedParallelsStopCleanup = ParallelsDesktopStopCleanupTracker()
+expect(
+    restartedParallelsStopCleanup.observe(.running) == .none &&
+        restartedParallelsStopCleanup.observe(.stopped) == .schedule &&
+        restartedParallelsStopCleanup.verify(
+            processState: .running,
+            runningSharedApplicationProcessIdentifiers: []
+        ) == .cancel &&
+        restartedParallelsStopCleanup.verify(
+            processState: .stopped,
+            runningSharedApplicationProcessIdentifiers: []
+        ) == .none,
+    "a VM restart cancels pending Parallels cleanup"
 )
 expect(
     !ParallelsVirtualMachineProtectionPolicy.virtualMachineIsInUse(

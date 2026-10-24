@@ -376,8 +376,8 @@ final class AppModel: ObservableObject {
         AutomaticWindowProtectionFailurePresentationTracker()
     private var automaticWindowProtectionGeneration = 0
     private var workspaceSessionIsActive = true
-    private var lastParallelsVirtualMachineProcessState:
-        ParallelsVirtualMachineProcessState = .unavailable
+    private var parallelsDesktopStopCleanupTracker =
+        ParallelsDesktopStopCleanupTracker()
     private var pendingParallelsDesktopQuitAfterVMStopToken: UUID?
     private var timer: Timer?
     private var observers: [NSObjectProtocol] = []
@@ -1372,22 +1372,15 @@ final class AppModel: ObservableObject {
                 workspaceApplications: workspaceRunningApplications,
                 frontmostApplication: frontmostApplication
             )
-        if parallelsProcessSnapshot.state != .unavailable {
-            if ParallelsVirtualMachineProtectionPolicy
-                .shouldQuitParallelsAfterVirtualMachineStops(
-                    previousProcessState:
-                        lastParallelsVirtualMachineProcessState,
-                    currentProcessState: parallelsProcessSnapshot.state,
-                    runningSharedApplicationProcessIdentifiers:
-                        runningSharedApplicationProcessIdentifiers
-                ) {
-                scheduleParallelsDesktopQuitAfterVMStops()
-            }
-            lastParallelsVirtualMachineProcessState =
-                parallelsProcessSnapshot.state
-            if parallelsProcessSnapshot.state == .running {
-                pendingParallelsDesktopQuitAfterVMStopToken = nil
-            }
+        switch parallelsDesktopStopCleanupTracker.observe(
+            parallelsProcessSnapshot.state
+        ) {
+        case .schedule, .retry:
+            scheduleParallelsDesktopQuitAfterVMStops()
+        case .cancel:
+            pendingParallelsDesktopQuitAfterVMStopToken = nil
+        case .none, .quit:
+            break
         }
         let parallelsVirtualMachineIsInUse =
             ParallelsVirtualMachineProtectionPolicy.virtualMachineIsInUse(
@@ -1625,11 +1618,19 @@ final class AppModel: ObservableObject {
 
         let token = UUID()
         pendingParallelsDesktopQuitAfterVMStopToken = token
-        // Confirm the VM really stayed stopped. This protects a VM launch from
-        // a brief process inventory gap while still closing Parallels promptly.
+        scheduleParallelsDesktopQuitAfterVMStopVerification(token: token)
+    }
+
+    private func scheduleParallelsDesktopQuitAfterVMStopVerification(
+        token: UUID
+    ) {
         DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
             guard let self,
                   self.pendingParallelsDesktopQuitAfterVMStopToken == token else {
+                return
+            }
+            guard self.automationEnabled, self.workspaceSessionIsActive else {
+                self.pendingParallelsDesktopQuitAfterVMStopToken = nil
                 return
             }
 
@@ -1643,19 +1644,24 @@ final class AppModel: ObservableObject {
                     frontmostApplication:
                         NSWorkspace.shared.frontmostApplication
                 )
-            guard self.automationEnabled,
-                  ParallelsVirtualMachineProtectionPolicy
-                    .shouldQuitParallelsAfterVirtualMachineStops(
-                        previousProcessState: .running,
-                        currentProcessState: latestSnapshot.state,
-                        runningSharedApplicationProcessIdentifiers:
-                            sharedApplicationProcessIdentifiers
-                    ) else {
+            let decision = self.parallelsDesktopStopCleanupTracker.verify(
+                processState: latestSnapshot.state,
+                runningSharedApplicationProcessIdentifiers:
+                    sharedApplicationProcessIdentifiers
+            )
+            switch decision {
+            case .retry, .schedule:
+                self.scheduleParallelsDesktopQuitAfterVMStopVerification(
+                    token: token
+                )
+                return
+            case .cancel, .none:
                 self.pendingParallelsDesktopQuitAfterVMStopToken = nil
                 return
+            case .quit:
+                self.pendingParallelsDesktopQuitAfterVMStopToken = nil
             }
 
-            self.pendingParallelsDesktopQuitAfterVMStopToken = nil
             let dockHelpers = workspaceApplications.filter {
                 ParallelsVirtualMachineProtectionPolicy.isWindowsDockHelper(
                     bundleIdentifier: $0.bundleIdentifier,

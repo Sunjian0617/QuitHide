@@ -172,44 +172,54 @@ struct ParallelsVirtualMachineProtectionTests {
         ) == .startNow)
     }
 
-    @Test("Parallels Desktop quits only after the VM process stops")
-    func desktopQuitFollowsVMProcessExit() {
-        #expect(ParallelsVirtualMachineProtectionPolicy
-            .shouldQuitParallelsAfterVirtualMachineStops(
-            previousProcessState: .running,
-            currentProcessState: .stopped,
-            runningSharedApplicationProcessIdentifiers: []
-        ))
-        #expect(!ParallelsVirtualMachineProtectionPolicy
-            .shouldQuitParallelsAfterVirtualMachineStops(
-            previousProcessState: .running,
-            currentProcessState: .stopped,
+    @Test("A VM stop remains pending until the last Windows app disappears")
+    func postStopCleanupWaitsForGuestApps() {
+        var tracker = ParallelsDesktopStopCleanupTracker()
+
+        #expect(tracker.observe(.running) == .none)
+        #expect(tracker.observe(.stopped) == .schedule)
+        #expect(tracker.verify(
+            processState: .stopped,
             runningSharedApplicationProcessIdentifiers: [102]
-        ))
-        #expect(!ParallelsVirtualMachineProtectionPolicy
-            .shouldQuitParallelsAfterVirtualMachineStops(
-            previousProcessState: .running,
-            currentProcessState: .running,
+        ) == .retry)
+        #expect(tracker.verify(
+            processState: .stopped,
             runningSharedApplicationProcessIdentifiers: []
-        ))
-        #expect(!ParallelsVirtualMachineProtectionPolicy
-            .shouldQuitParallelsAfterVirtualMachineStops(
-            previousProcessState: .stopped,
-            currentProcessState: .stopped,
+        ) == .quit)
+        #expect(tracker.verify(
+            processState: .stopped,
             runningSharedApplicationProcessIdentifiers: []
-        ))
-        #expect(!ParallelsVirtualMachineProtectionPolicy
-            .shouldQuitParallelsAfterVirtualMachineStops(
-            previousProcessState: .unavailable,
-            currentProcessState: .stopped,
+        ) == .none)
+    }
+
+    @Test("An unavailable snapshot keeps pending VM stop cleanup alive")
+    func unavailableSnapshotRetriesPostStopCleanup() {
+        var tracker = ParallelsDesktopStopCleanupTracker()
+        #expect(tracker.observe(.running) == .none)
+        #expect(tracker.observe(.stopped) == .schedule)
+        #expect(tracker.verify(
+            processState: .unavailable,
             runningSharedApplicationProcessIdentifiers: []
-        ))
-        #expect(!ParallelsVirtualMachineProtectionPolicy
-            .shouldQuitParallelsAfterVirtualMachineStops(
-            previousProcessState: .running,
-            currentProcessState: .unavailable,
+        ) == .retry)
+        #expect(tracker.verify(
+            processState: .stopped,
             runningSharedApplicationProcessIdentifiers: []
-        ))
+        ) == .quit)
+    }
+
+    @Test("A VM restart cancels pending Parallels quit cleanup")
+    func virtualMachineRestartCancelsPostStopCleanup() {
+        var tracker = ParallelsDesktopStopCleanupTracker()
+        #expect(tracker.observe(.running) == .none)
+        #expect(tracker.observe(.stopped) == .schedule)
+        #expect(tracker.verify(
+            processState: .running,
+            runningSharedApplicationProcessIdentifiers: []
+        ) == .cancel)
+        #expect(tracker.verify(
+            processState: .stopped,
+            runningSharedApplicationProcessIdentifiers: []
+        ) == .none)
     }
 
     @Test("A running shared Windows app counts as VM use")
