@@ -107,6 +107,8 @@
 "status.active" = "In Use · Waiting to Start";
 "status.other_desktop_window" = "Open on Another Desktop · Timer Paused";
 "status.other_desktop_window.help" = "A visible window exists on another desktop. QuitHide pauses the automatic hide or quit timer until that desktop is active or the window is closed.";
+"status.minimized_window.protected" = "Window Minimized · Automatic Quit Paused";
+"status.minimized_window.unavailable" = "Minimized State Unknown · Automatic Quit Paused";
 "status.parallels_vm.in_use" = "Virtual Machine Running · Parallels Stays Open";
 "status.parallels_vm.in_use.help" = "QuitHide keeps Parallels Desktop open while the VM process runs. Windows apps in Parallels keep the VM in use; after all of them close, the VM's own countdown can finish. When its process stops, QuitHide requests a normal quit for Parallels Desktop.";
 "status.parallels_vm.unavailable" = "Virtual Machine State Unknown · Automation Paused";
@@ -172,6 +174,12 @@
 "settings.screen_visibility_protection.active" = "Active · No automatic-rule apps currently need protection";
 "settings.screen_visibility_protection.active_count" = "Active · Visible automatic-rule apps protected: {count}";
 "settings.screen_visibility_protection.unavailable" = "Window visibility cannot be determined reliably right now, so automation is paused";
+"settings.minimized_window_protection.title" = "Protect Minimized Windows from Automatic Quit";
+"settings.minimized_window_protection.help" = "Apps with an automatic quit rule pause their quit countdown while any window is minimized; restoring the window starts a fresh countdown. Accessibility reads only the minimized state, not window contents. Accessibility permission is required.";
+"settings.minimized_window_protection.active" = "Active · Automatic quit pauses for minimized apps";
+"settings.minimized_window_protection.permission_required" = "Accessibility permission is required to detect minimized windows";
+"settings.minimized_window_protection.unavailable" = "Some app window states could not be read; automatic quit is paused for those apps";
+"settings.minimized_window_protection.grant_permission" = "Grant Accessibility Permission…";
 "settings.about.title" = "About QuitHide";
 "settings.about.author" = "Author: 江sir爱数码";
 "settings.about.feedback" = "Feedback via WeChat: jsasm1";

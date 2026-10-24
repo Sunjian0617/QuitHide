@@ -105,6 +105,33 @@ expect(
     ),
     "active or unconfigured apps do not start an unhide timer"
 )
+let minimizedQuitIsHeld =
+    ApplicationMinimizedWindowProtectionPolicy.shouldHoldQuitCountdown(
+        action: .quit,
+        hasMinimizedWindow: true
+    )
+expect(
+    minimizedQuitIsHeld &&
+        ApplicationIdleTimerPolicy.directive(
+            actionIsAutomated: true,
+            applicationIsActive: false,
+            applicationIsHeld: minimizedQuitIsHeld,
+            hasTimer: true
+        ) == .clear,
+    "a minimized app clears its automatic quit countdown"
+)
+expect(
+    !ApplicationMinimizedWindowProtectionPolicy.shouldHoldQuitCountdown(
+        action: .hide,
+        hasMinimizedWindow: true
+    ) && ApplicationIdleTimerPolicy.directive(
+        actionIsAutomated: true,
+        applicationIsActive: false,
+        applicationIsHeld: false,
+        hasTimer: false
+    ) == .startNow,
+    "minimizing an app does not change its automatic hide timer"
+)
 
 let parallelsVMRunning = ParallelsVirtualMachineProtectionPolicy.processState(
     executableNames: Set(["prl_vm_app"])

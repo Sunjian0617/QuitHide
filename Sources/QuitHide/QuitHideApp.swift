@@ -42,6 +42,8 @@ struct RunningAppItem: Identifiable {
     let isHidden: Bool
     let isActive: Bool
     let hasVisibleWindowOnAnotherSpace: Bool
+    let hasMinimizedWindow: Bool
+    let minimizedWindowStateIsUnavailable: Bool
     let parallelsVMProcessState: ParallelsVirtualMachineProcessState
     let parallelsVirtualMachineIsInUse: Bool
     let isParallelsVirtualMachineProcess: Bool
@@ -297,6 +299,8 @@ final class AppModel: ObservableObject {
     @Published private(set) var stageManagerGroupProtectionStatus: StageManagerGroupProtectionStatus
     @Published private(set) var screenVisibilityProtectionEnabled: Bool
     @Published private(set) var screenVisibilityProtectionStatus: ScreenVisibilityProtectionStatus
+    @Published private(set) var minimizedWindowProtectionStatus:
+        ApplicationMinimizedWindowProtectionStatus
     @Published private(set) var languagePreference: AppLanguagePreference
     @Published private(set) var resolvedLanguage: ResolvedAppLanguage
     // Operation status is intentionally not user-facing. Keep it out of the
@@ -331,9 +335,13 @@ final class AppModel: ObservableObject {
         any StageManagerSystemStateProviding
     private let stageManagerGroupingProvider: any StageManagerGroupingProviding
     private let screenVisibilityProvider: any ScreenVisibilityProviding
+    private let minimizedWindowProvider:
+        any ApplicationMinimizedWindowProviding
     private var ruleRegistry: StoredRuleRegistry
     private var isRuleRegistryWritable: Bool
     private var inactiveSince: [String: TimeInterval] = [:]
+    private var minimizedWindowProcessIdentifiers: Set<pid_t> = []
+    private var unavailableMinimizedWindowProcessIdentifiers: Set<pid_t> = []
     private var fallbackRuntimeGenerations: [FallbackRuntimeGeneration] = []
     private var alreadyHandled: Set<String> = []
     private var actionFailures: [String: AutoAction] = [:]
@@ -391,13 +399,19 @@ final class AppModel: ObservableObject {
         stageManagerGroupingProvider: any StageManagerGroupingProviding =
             SystemStageManagerGroupingProvider(),
         screenVisibilityProvider: any ScreenVisibilityProviding =
-            SystemScreenVisibilityProvider()
+            SystemScreenVisibilityProvider(),
+        minimizedWindowProvider: any ApplicationMinimizedWindowProviding =
+            SystemApplicationMinimizedWindowProvider()
     ) {
         self.automationClock = automationClock
         self.ruleStore = ruleStore
         self.stageManagerSystemStateProvider = stageManagerSystemStateProvider
         self.stageManagerGroupingProvider = stageManagerGroupingProvider
         self.screenVisibilityProvider = screenVisibilityProvider
+        self.minimizedWindowProvider = minimizedWindowProvider
+        minimizedWindowProtectionStatus = StageManagerAccessibility.isTrusted
+            ? .active
+            : .permissionRequired
         let savedLanguagePreference = UserDefaults.standard.string(
             forKey: Keys.languagePreference
         ).flatMap(AppLanguagePreference.init(rawValue:)) ?? .system
@@ -831,6 +845,11 @@ final class AppModel: ObservableObject {
         automaticWindowProtectionSettingsDidChange()
     }
 
+    func requestMinimizedWindowProtectionPermission() {
+        minimizedWindowProtectionStatus = .permissionRequired
+        StageManagerAccessibility.requestPermission()
+    }
+
     var stageManagerGroupProtectionNeedsPermission: Bool {
         stageManagerGroupProtectionStatus == .permissionRequired
     }
@@ -1044,6 +1063,21 @@ final class AppModel: ObservableObject {
                 text: localized(.statusOtherDesktopWindow),
                 isProtected: true,
                 helpText: localized(.statusOtherDesktopWindowHelp)
+            )
+        }
+        if ApplicationMinimizedWindowProtectionPolicy
+            .shouldHoldQuitCountdown(
+                action: action,
+                hasMinimizedWindow: item.hasMinimizedWindow,
+                windowStateIsUnavailable:
+                    item.minimizedWindowStateIsUnavailable
+            ) {
+            let key: L10n.Key = item.minimizedWindowStateIsUnavailable
+                ? .statusMinimizedWindowUnavailable
+                : .statusMinimizedWindowProtected
+            return AppAutomationStatus(
+                text: localized(key),
+                isProtected: true
             )
         }
         if item.isActive {
@@ -1413,6 +1447,14 @@ final class AppModel: ObservableObject {
                                     processesWithVisibleWindowsOnInactiveSpaces
                                         .contains(app.processIdentifier)
                             ),
+                    hasMinimizedWindow:
+                        minimizedWindowProcessIdentifiers.contains(
+                            app.processIdentifier
+                        ),
+                    minimizedWindowStateIsUnavailable:
+                        unavailableMinimizedWindowProcessIdentifiers.contains(
+                            app.processIdentifier
+                        ),
                     parallelsVMProcessState: parallelsProcessSnapshot.state,
                     parallelsVirtualMachineIsInUse:
                         parallelsVirtualMachineIsInUse,
@@ -1547,7 +1589,14 @@ final class AppModel: ObservableObject {
                 applicationIsActive: item.isActive,
                 applicationIsHeld: automaticallyProtectedBundleIdentifiers.contains(
                     item.bundleIdentifier
-                ) || item.isProtectedByParallelsVM,
+                ) || item.isProtectedByParallelsVM ||
+                    ApplicationMinimizedWindowProtectionPolicy
+                    .shouldHoldQuitCountdown(
+                        action: action,
+                        hasMinimizedWindow: item.hasMinimizedWindow,
+                        windowStateIsUnavailable:
+                            item.minimizedWindowStateIsUnavailable
+                    ),
                 applicationHasVisibleWindowOnAnotherSpace:
                     item.hasVisibleWindowOnAnotherSpace,
                 hasTimer: inactiveSince[item.id] != nil
@@ -1580,6 +1629,84 @@ final class AppModel: ObservableObject {
         }
         apps = running
         rebuildCatalog()
+    }
+
+    private func refreshMinimizedWindowProtection() async {
+        let processIdentifiers = Set(apps.compactMap { item -> pid_t? in
+            guard effectivePolicy(for: item.bundleIdentifier) == .quit,
+                  !item.isActive,
+                  !item.hasVisibleWindowOnAnotherSpace,
+                  !item.isProtectedByParallelsVM,
+                  !automaticallyProtectedBundleIdentifiers.contains(
+                    item.bundleIdentifier
+                  ) else {
+                return nil
+            }
+            return item.processIdentifier
+        })
+
+        guard !processIdentifiers.isEmpty else {
+            minimizedWindowProcessIdentifiers = []
+            unavailableMinimizedWindowProcessIdentifiers = []
+            let status: ApplicationMinimizedWindowProtectionStatus =
+                StageManagerAccessibility.isTrusted
+                ? .active
+                : .permissionRequired
+            if minimizedWindowProtectionStatus != status {
+                minimizedWindowProtectionStatus = status
+            }
+            return
+        }
+
+        let snapshot = await minimizedWindowProvider.readSnapshot(
+            processIdentifiers: processIdentifiers
+        )
+        let runningProcessIdentifiers = Set(
+            NSWorkspace.shared.runningApplications.map(\.processIdentifier)
+        )
+        minimizedWindowProcessIdentifiers = snapshot
+            .minimizedProcessIdentifiers
+            .intersection(runningProcessIdentifiers)
+        unavailableMinimizedWindowProcessIdentifiers = snapshot
+            .unavailableProcessIdentifiers
+            .intersection(runningProcessIdentifiers)
+        if minimizedWindowProtectionStatus != snapshot.status {
+            minimizedWindowProtectionStatus = snapshot.status
+        }
+    }
+
+    private func refreshMinimizedWindowProtection(
+        for processIdentifier: pid_t
+    ) async {
+        let snapshot = await minimizedWindowProvider.readSnapshot(
+            processIdentifiers: [processIdentifier]
+        )
+        let isStillRunning = NSWorkspace.shared.runningApplications.contains {
+            $0.processIdentifier == processIdentifier
+        }
+        guard isStillRunning else { return }
+
+        minimizedWindowProcessIdentifiers.remove(processIdentifier)
+        unavailableMinimizedWindowProcessIdentifiers.remove(processIdentifier)
+        minimizedWindowProcessIdentifiers.formUnion(
+            snapshot.minimizedProcessIdentifiers
+        )
+        unavailableMinimizedWindowProcessIdentifiers.formUnion(
+            snapshot.unavailableProcessIdentifiers
+        )
+
+        let status: ApplicationMinimizedWindowProtectionStatus
+        if snapshot.status == .permissionRequired {
+            status = .permissionRequired
+        } else if !unavailableMinimizedWindowProcessIdentifiers.isEmpty {
+            status = .unavailable
+        } else {
+            status = .active
+        }
+        if minimizedWindowProtectionStatus != status {
+            minimizedWindowProtectionStatus = status
+        }
+        refreshApps()
     }
 
     private func sharedWindowsApplicationProcessIdentifiers(
@@ -1711,7 +1838,14 @@ final class AppModel: ObservableObject {
                 automaticallyProtectedBundleIdentifiers.contains(
                     item.bundleIdentifier
                 ) || item.hasVisibleWindowOnAnotherSpace ||
-                item.isProtectedByParallelsVM
+                item.isProtectedByParallelsVM ||
+                ApplicationMinimizedWindowProtectionPolicy
+                .shouldHoldQuitCountdown(
+                    action: effectivePolicy(for: item.bundleIdentifier),
+                    hasMinimizedWindow: item.hasMinimizedWindow,
+                    windowStateIsUnavailable:
+                        item.minimizedWindowStateIsUnavailable
+                )
         )
         if shouldRestartTimer {
             inactiveSince[item.id] =
@@ -2119,7 +2253,13 @@ final class AppModel: ObservableObject {
                             .hasVisibleWindowOnAnotherSpace ?? false,
                     isProtectedByParallelsVM:
                         self.apps.first(where: { $0.id == runtimeID })?
-                            .isProtectedByParallelsVM ?? false
+                            .isProtectedByParallelsVM ?? false,
+                    hasMinimizedWindow:
+                        self.apps.first(where: { $0.id == runtimeID })?
+                            .hasMinimizedWindow ?? false,
+                    minimizedWindowStateIsUnavailable:
+                        self.apps.first(where: { $0.id == runtimeID })?
+                            .minimizedWindowStateIsUnavailable ?? false
                 ) {
                     self.inactiveSince[runtimeID] = self.effectiveNow
                 }
@@ -2272,6 +2412,8 @@ final class AppModel: ObservableObject {
 
     private func checkIdleApps() async {
         refreshApps()
+        await refreshMinimizedWindowProtection()
+        refreshApps()
         guard workspaceSessionIsActive else { return }
         guard await refreshAutomaticWindowProtection() else { return }
         guard automationEnabled else { return }
@@ -2296,6 +2438,13 @@ final class AppModel: ObservableObject {
                   !item.isProtectedByParallelsVM,
                   !item.isActive,
                   !item.hasVisibleWindowOnAnotherSpace,
+                  !ApplicationMinimizedWindowProtectionPolicy
+                    .shouldHoldQuitCountdown(
+                        action: action,
+                        hasMinimizedWindow: item.hasMinimizedWindow,
+                        windowStateIsUnavailable:
+                            item.minimizedWindowStateIsUnavailable
+                    ),
                   let inactiveAt = inactiveSince[runtimeID] else { continue }
 
             let elapsed = now - inactiveAt
@@ -2324,6 +2473,9 @@ final class AppModel: ObservableObject {
                     else {
                         return
                     }
+                    await refreshMinimizedWindowProtection(
+                        for: item.processIdentifier
+                    )
                     let validationNow = effectiveNow
                     expireAutomationDeferrals(at: validationNow)
                     let currentlyEligibleItem =
@@ -2391,6 +2543,11 @@ final class AppModel: ObservableObject {
                 .revision(for: bundleID)
             guard await validateAcceptedScreenVisibilityFingerprint() else {
                 return
+            }
+            if action == .quit {
+                await refreshMinimizedWindowProtection(
+                    for: item.processIdentifier
+                )
             }
             let validationNow = effectiveNow
             expireAutomationDeferrals(at: validationNow)
@@ -2483,6 +2640,13 @@ final class AppModel: ObservableObject {
               !currentItem.isProtectedByParallelsVM,
               !currentItem.isActive,
               !currentItem.hasVisibleWindowOnAnotherSpace,
+              !ApplicationMinimizedWindowProtectionPolicy
+                .shouldHoldQuitCountdown(
+                    action: action,
+                    hasMinimizedWindow: currentItem.hasMinimizedWindow,
+                    windowStateIsUnavailable:
+                        currentItem.minimizedWindowStateIsUnavailable
+                ),
               let inactiveAt = inactiveSince[runtimeID] else {
             return nil
         }
@@ -2957,12 +3121,22 @@ final class AppModel: ObservableObject {
         bundleIdentifier: String,
         isActive: Bool,
         hasVisibleWindowOnAnotherSpace: Bool = false,
-        isProtectedByParallelsVM: Bool = false
+        isProtectedByParallelsVM: Bool = false,
+        hasMinimizedWindow: Bool = false,
+        minimizedWindowStateIsUnavailable: Bool = false
     ) -> Bool {
-        effectivePolicy(for: bundleIdentifier).isAutomated &&
+        let action = effectivePolicy(for: bundleIdentifier)
+        return action.isAutomated &&
             !isActive &&
             !hasVisibleWindowOnAnotherSpace &&
             !isProtectedByParallelsVM &&
+            !ApplicationMinimizedWindowProtectionPolicy
+                .shouldHoldQuitCountdown(
+                    action: action,
+                    hasMinimizedWindow: hasMinimizedWindow,
+                    windowStateIsUnavailable:
+                        minimizedWindowStateIsUnavailable
+                ) &&
             !automaticallyProtectedBundleIdentifiers.contains(bundleIdentifier)
     }
 
@@ -3559,7 +3733,10 @@ final class AppModel: ObservableObject {
                    hasVisibleWindowOnAnotherSpace:
                        item.hasVisibleWindowOnAnotherSpace,
                    isProtectedByParallelsVM:
-                       item.isProtectedByParallelsVM
+                       item.isProtectedByParallelsVM,
+                   hasMinimizedWindow: item.hasMinimizedWindow,
+                   minimizedWindowStateIsUnavailable:
+                       item.minimizedWindowStateIsUnavailable
                ) {
                 inactiveSince[item.id] = restartAt
             }
@@ -3621,15 +3798,24 @@ final class AppModel: ObservableObject {
         quitDeadlineAttempted.remove(runtimeIdentifier)
         preQuitHideStates.removeValue(forKey: runtimeIdentifier)
 
+        let action = effectivePolicy(for: bundleIdentifier)
+        let currentItem = apps.first(where: { $0.id == runtimeIdentifier })
         let shouldRestartTimer = ApplicationUnhidePolicy.shouldRestartTimer(
-            actionIsAutomated: effectivePolicy(for: bundleIdentifier).isAutomated,
+            actionIsAutomated: action.isAutomated,
             applicationIsActive: app.isActive,
             applicationIsHeld:
                 automaticallyProtectedBundleIdentifiers.contains(bundleIdentifier) ||
-                apps.first(where: { $0.id == runtimeIdentifier })?
-                    .hasVisibleWindowOnAnotherSpace == true ||
-                apps.first(where: { $0.id == runtimeIdentifier })?
-                    .isProtectedByParallelsVM == true
+                currentItem?.hasVisibleWindowOnAnotherSpace == true ||
+                currentItem?.isProtectedByParallelsVM == true ||
+                ApplicationMinimizedWindowProtectionPolicy
+                    .shouldHoldQuitCountdown(
+                        action: action,
+                        hasMinimizedWindow:
+                            currentItem?.hasMinimizedWindow == true,
+                        windowStateIsUnavailable:
+                            currentItem?
+                                .minimizedWindowStateIsUnavailable == true
+                    )
         )
         if shouldRestartTimer {
             inactiveSince[runtimeIdentifier] = timingSuspension.effectiveNow(at: eventInstant)
@@ -3659,7 +3845,10 @@ final class AppModel: ObservableObject {
                    hasVisibleWindowOnAnotherSpace:
                        item.hasVisibleWindowOnAnotherSpace,
                    isProtectedByParallelsVM:
-                       item.isProtectedByParallelsVM
+                       item.isProtectedByParallelsVM,
+                   hasMinimizedWindow: item.hasMinimizedWindow,
+                   minimizedWindowStateIsUnavailable:
+                       item.minimizedWindowStateIsUnavailable
                ) {
                 inactiveSince[item.id] = effectiveNow
             } else {
@@ -3704,7 +3893,10 @@ final class AppModel: ObservableObject {
                    hasVisibleWindowOnAnotherSpace:
                        item.hasVisibleWindowOnAnotherSpace,
                    isProtectedByParallelsVM:
-                       item.isProtectedByParallelsVM
+                       item.isProtectedByParallelsVM,
+                   hasMinimizedWindow: item.hasMinimizedWindow,
+                   minimizedWindowStateIsUnavailable:
+                       item.minimizedWindowStateIsUnavailable
                ) {
                 inactiveSince[item.id] = effectiveNow
             } else {
@@ -4271,6 +4463,37 @@ struct SettingsSheet: View {
         }
     }
 
+    private var minimizedWindowProtectionStatusPresentation: (
+        text: String,
+        symbol: String,
+        color: Color
+    ) {
+        switch model.minimizedWindowProtectionStatus {
+        case .active:
+            return (
+                model.localized(.settingsMinimizedWindowProtectionActive),
+                "checkmark.shield",
+                .green
+            )
+        case .permissionRequired:
+            return (
+                model.localized(
+                    .settingsMinimizedWindowProtectionPermissionRequired
+                ),
+                "lock.trianglebadge.exclamationmark",
+                .orange
+            )
+        case .unavailable:
+            return (
+                model.localized(
+                    .settingsMinimizedWindowProtectionUnavailable
+                ),
+                "exclamationmark.triangle",
+                .orange
+            )
+        }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             Text(model.localized(.settingsTitle))
@@ -4505,6 +4728,39 @@ struct SettingsSheet: View {
                             .foregroundStyle(presentation.color)
                             .fixedSize(horizontal: false, vertical: true)
                             .padding(.leading, 34)
+                    }
+                }
+
+                VStack(alignment: .leading, spacing: 7) {
+                    Text(model.localized(
+                        .settingsMinimizedWindowProtectionTitle
+                    ))
+                        .font(.callout.weight(.medium))
+
+                    Text(model.localized(
+                        .settingsMinimizedWindowProtectionHelp
+                    ))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    let presentation =
+                        minimizedWindowProtectionStatusPresentation
+                    Label(presentation.text, systemImage: presentation.symbol)
+                        .font(.caption)
+                        .foregroundStyle(presentation.color)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    if model.minimizedWindowProtectionStatus ==
+                        .permissionRequired {
+                        Button(
+                            model.localized(
+                                .settingsMinimizedWindowProtectionGrantPermission
+                            )
+                        ) {
+                            model.requestMinimizedWindowProtectionPermission()
+                        }
+                        .controlSize(.small)
                     }
                 }
             }

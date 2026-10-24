@@ -53,6 +53,17 @@ enum ApplicationUnhidePolicy {
     }
 }
 
+enum ApplicationMinimizedWindowProtectionPolicy {
+    static func shouldHoldQuitCountdown(
+        action: AutoAction,
+        hasMinimizedWindow: Bool,
+        windowStateIsUnavailable: Bool = false
+    ) -> Bool {
+        action == .quit &&
+            (hasMinimizedWindow || windowStateIsUnavailable)
+    }
+}
+
 enum HideActionPresentation: Equatable {
     case none
     case inProgress
